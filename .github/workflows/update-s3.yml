@@ -1,8 +1,8 @@
 name: Update S3 Data
 
 on:
-  schedule:
-    - cron: "36 16 * * *" # Runs at 10 PM IST (UTC+5.5) daily
+  # schedule:
+  #  - cron: "36 16 * * *" # Runs at 10 PM IST (UTC+5.5) daily
   workflow_dispatch: {}
 
 jobs:
