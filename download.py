@@ -1359,10 +1359,11 @@ def get_latest_date_from_metadata(force_check_files=False):
     Falls back to parsing individual files if needed or if force_check_files=True.
     """
     # First try to download the index.json file from S3
-    s3 = boto3.client('s3'  )
+    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED)  )
     current_year = datetime.now().year
     index_path = os.path.join(LOCAL_DIR, f"sc-judgments-{current_year}-metadata.index.json")
     index_key = f"{S3_PREFIX}sc-judgments-{current_year}-metadata.index.json"
+
     
     if not force_check_files:
         try:
@@ -1377,13 +1378,6 @@ def get_latest_date_from_metadata(force_check_files=False):
                 updated_at = datetime.fromisoformat(index_data["updated_at"])
                 print(f"[INFO] Found updated_at in index.json: {updated_at}")
                 return updated_at
-            
-            ## TODO needs review
-            # If no updated_at but there's created_at
-            # if "created_at" in index_data:
-            #     created_at = datetime.fromisoformat(index_data["created_at"])
-            #     print(f"[INFO] Using created_at from index.json: {created_at}")
-            #     return created_at
                 
         except Exception as e:
             print(f"[INFO] Could not use index.json for date detection: {e}")
