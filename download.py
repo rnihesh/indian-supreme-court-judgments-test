@@ -988,10 +988,10 @@ def sync_latest_metadata_zip(force_refresh=True):
     try:
         s3.head_object(Bucket=S3_BUCKET, Key=current_year_key)
         latest_zip_key = current_year_key
-        print(f"Found current year ({current_year}) metadata")
+        logger.info(f"Found current year ({current_year}) metadata")
     except:
         # Fall back to finding the latest available year
-        print(f"Current year metadata not found, finding latest available...")
+        logger.info(f"Current year metadata not found, finding latest available...")
         zips = []
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=S3_PREFIX):
@@ -1009,14 +1009,14 @@ def sync_latest_metadata_zip(force_refresh=True):
     
     # Force a fresh download if requested
     if force_refresh and os.path.exists(local_path):
-        print(f"Removing cached metadata zip to force refresh...")
+        logger.info(f"Removing cached metadata zip to force refresh...")
         os.remove(local_path)
         
     if not os.path.exists(local_path):
-        print(f"Downloading {latest_zip_key} ...")
+        logger.info(f"Downloading {latest_zip_key} ...")
         s3.download_file(S3_BUCKET, latest_zip_key, local_path)
     else:
-        print(f"Using cached metadata zip: {local_path}")
+        logger.info(f"Using cached metadata zip: {local_path}")
         
     return local_path
 
@@ -1051,16 +1051,16 @@ def find_latest_decision_date_in_zip(zip_path):
                 except Exception:
                     continue
     if latest_date:
-        print(f"[INFO] Latest decision date in metadata zip: {latest_date.date()}")
+        logger.info(f"Latest decision date in metadata zip: {latest_date.date()}")
     else:
-        print("[WARN] No decision date found in metadata zip, falling back to ZIP entry date.")
+        logger.warning("No decision date found in metadata zip, falling back to ZIP entry date.")
         # fallback (not recommended)
         with zipfile.ZipFile(zip_path, "r") as z:
             latest_date = max(datetime(*zi.date_time[:3]) for zi in z.infolist())
     return latest_date
 
 def run_downloader(start_date, end_date):
-    print(f"Fetching new data from {start_date} to {end_date} ...")
+    logger.info(f"Fetching new data from {start_date} to {end_date} ...")
     run(
         start_date=(start_date + timedelta(days=1)).strftime("%Y-%m-%d"),
         end_date=end_date.strftime("%Y-%m-%d")
@@ -1120,7 +1120,7 @@ def upload_new_zips_to_s3():
                             if item not in s3_files_info or local_files_info[item] >= s3_files_info[item]:
                                 merged_zip.writestr(item, local_zip.read(item))
                         except KeyError as e:
-                            print(f"Warning: {item} not found in local zip but listed in index")
+                            logger.warning(f"{item} not found in local zip but listed in index")
     
     # Process a single package
     def process_package(local_zip_name, package_type):
@@ -1134,7 +1134,7 @@ def upload_new_zips_to_s3():
             
             # Check if both files exist locally
             if not os.path.exists(local_index_path):
-                print(f"Skipping {local_zip_name}: Missing index file")
+                logger.warning(f"Skipping {local_zip_name}: Missing index file")
                 return package_type, False
             
             # Load local index
@@ -1154,7 +1154,7 @@ def upload_new_zips_to_s3():
             
             try:
                 # Try to download existing index file
-                print(f"Downloading index file {s3_index_key}...")
+                logger.info(f"Downloading index file {s3_index_key}...")
                 s3.download_file(S3_BUCKET, s3_index_key, s3_index_path)
                 
                 with open(s3_index_path, 'r') as f:
@@ -1178,8 +1178,8 @@ def upload_new_zips_to_s3():
                     json.dump(merged_index, f, indent=2)
                 
                 if not new_files:
-                    print(f"No new files to add to {local_zip_name}")
-                    print(f"Uploading updated index with new timestamp to {s3_index_key}")
+                    logger.info(f"No new files to add to {local_zip_name}")
+                    logger.info(f"Uploading updated index with new timestamp to {s3_index_key}")
                     
                     # Upload updated index file even if there are no new zip contents
                     s3.upload_file(
@@ -1191,14 +1191,14 @@ def upload_new_zips_to_s3():
                     return package_type, True
                 
                 # Download existing zip
-                print(f"Downloading existing zip {s3_zip_key}...")
+                logger.info(f"Downloading existing zip {s3_zip_key}...")
                 s3.download_file(S3_BUCKET, s3_zip_key, s3_zip_path)
                 
                 # Merge zip files
                 merge_zip_files(s3_zip_path, local_zip_path, merged_zip_path, new_files)
                 
                 # Upload merged files
-                print(f"Uploading merged {local_zip_name} with {len(new_files)} new files to {s3_zip_key}")
+                logger.info(f"Uploading merged {local_zip_name} with {len(new_files)} new files to {s3_zip_key}")
                 s3.upload_file(
                     merged_zip_path, 
                     S3_BUCKET, 
@@ -1206,7 +1206,7 @@ def upload_new_zips_to_s3():
                     Callback=ProgressPercentage(merged_zip_path)
                 )
                 
-                print(f"Uploading updated {local_index} to {s3_index_key}")
+                logger.info(f"Uploading updated {local_index} to {s3_index_key}")
                 s3.upload_file(
                     s3_index_path, 
                     S3_BUCKET, 
@@ -1218,7 +1218,7 @@ def upload_new_zips_to_s3():
             except s3.exceptions.ClientError as e:
                 if 'HeadObject' in str(e) or '404' in str(e):
                     # File doesn't exist in S3, upload directly
-                    print(f"Uploading new {local_zip_name} to {s3_zip_key}")
+                    logger.info(f"Uploading new {local_zip_name} to {s3_zip_key}")
                     
                     # Upload with progress bar
                     s3.upload_file(
@@ -1228,7 +1228,7 @@ def upload_new_zips_to_s3():
                         Callback=ProgressPercentage(local_zip_path)
                     )
                     
-                    print(f"Uploading new {local_index} to {s3_index_key}")
+                    logger.info(f"Uploading new {local_index} to {s3_index_key}")
                     s3.upload_file(
                         local_index_path, 
                         S3_BUCKET, 
@@ -1238,10 +1238,10 @@ def upload_new_zips_to_s3():
                     return package_type, True
                 else:
                     # Some other error occurred
-                    print(f"Error processing {local_zip_name}: {str(e)}")
+                    logger.error(f"Error processing {local_zip_name}: {str(e)}")
                     return package_type, False
         except Exception as e:
-            print(f"Error processing package {local_zip_name}: {str(e)}")
+            logger.error(f"Error processing package {local_zip_name}: {str(e)}")
             import traceback
             traceback.print_exc()
             return package_type, False
@@ -1259,12 +1259,12 @@ def upload_new_zips_to_s3():
     
     # Check if packages directory exists and has files
     if not os.path.exists(PACKAGES_DIR):
-        print(f"ERROR: Packages directory '{PACKAGES_DIR}' not found")
+        logger.error(f"Packages directory '{PACKAGES_DIR}' not found")
         return
     
     package_files = [f for f in os.listdir(PACKAGES_DIR) if f.endswith('.zip')]
     if not package_files:
-        print(f"WARNING: No zip files found in '{PACKAGES_DIR}'")
+        logger.warning(f"No zip files found in '{PACKAGES_DIR}'")
         return
     
     try:
@@ -1274,14 +1274,14 @@ def upload_new_zips_to_s3():
             session = boto3.Session()
             credentials = session.get_credentials()
             if credentials is None:
-                print("ERROR: No AWS credentials found.")
+                logger.error("No AWS credentials found.")
                 return
             
             # Create S3 client with credentials from profile
             s3 = session.client('s3')
-            print("Successfully authenticated with AWS")
+            logger.info("Successfully authenticated with AWS")
         except Exception as e:
-            print(f"Failed to initialize S3 client: {e}")
+            logger.error(f"Failed to initialize S3 client: {e}")
             return
             
         # Prepare package tasks
@@ -1298,7 +1298,7 @@ def upload_new_zips_to_s3():
             elif "metadata" in local_zip:
                 package_type = "metadata"
             else:
-                print(f"Warning: Unknown package type for {local_zip}, processing anyway")
+                logger.warning(f"Unknown package type for {local_zip}, processing anyway")
                 package_type = "unknown"
                 
             package_tasks.append((local_zip, package_type))
@@ -1325,11 +1325,11 @@ def upload_new_zips_to_s3():
                             if success:
                                 processed_types[pkg_type] = True
                         except Exception as e:
-                            print(f"Error in worker thread: {e}")
+                            logger.error(f"Error in worker thread: {e}")
                         pbar.update(1)
     
     except Exception as e:
-        print(f"Error during upload process: {str(e)}")
+        logger.error(f"Error during upload process: {str(e)}")
         import traceback
         traceback.print_exc()
     
@@ -1337,21 +1337,21 @@ def upload_new_zips_to_s3():
         # Report on which types were processed
         for pkg_type, was_processed in processed_types.items():
             if was_processed:
-                print(f"✅ {pkg_type.capitalize()} package processed successfully")
+                logger.info(f"✅ {pkg_type.capitalize()} package processed successfully")
             else:
-                print(f"⚠️ No {pkg_type} package was processed")
+                logger.warning(f"⚠️ No {pkg_type} package was processed")
                 
         # Clean up temporary files
         shutil.rmtree(temp_dir, ignore_errors=True)
-        print("Upload process completed")
+        logger.info("Upload process completed")
         
         # Delete packages directory after successful upload
         if all(processed_types.values()):
-            print("All package types processed successfully. Cleaning up packages directory...")
+            logger.info("All package types processed successfully. Cleaning up packages directory...")
             shutil.rmtree(PACKAGES_DIR, ignore_errors=True)
-            print(f"✅ Packages directory {PACKAGES_DIR} deleted")
+            logger.info(f"✅ Packages directory {PACKAGES_DIR} deleted")
         else:
-            print("⚠️ Not all package types were processed. Keeping packages directory for further processing.")
+            logger.warning("⚠️ Not all package types were processed. Keeping packages directory for further processing.")
 
 def get_latest_date_from_metadata(force_check_files=False):
     """
@@ -1376,14 +1376,14 @@ def get_latest_date_from_metadata(force_check_files=False):
             # Check if updated_at is available
             if "updated_at" in index_data:
                 updated_at = datetime.fromisoformat(index_data["updated_at"])
-                print(f"[INFO] Found updated_at in index.json: {updated_at}")
+                logger.info(f"Found updated_at in index.json: {updated_at}")
                 return updated_at
                 
         except Exception as e:
-            print(f"[INFO] Could not use index.json for date detection: {e}")
+            logger.info(f"Could not use index.json for date detection: {e}")
     
     # Fall back to the original method - parsing individual files
-    print("[INFO] Falling back to parsing individual files for decision dates...")
+    logger.info("Falling back to parsing individual files for decision dates...")
     latest_zip = sync_latest_metadata_zip()
     return find_latest_decision_date_in_zip(latest_zip)
 
@@ -1421,22 +1421,22 @@ if __name__ == "__main__":
 
     if args.sync_s3:
         latest_date = get_latest_date_from_metadata()
-        print(f"Latest date in metadata: {latest_date.date() if latest_date else 'Unknown'}")
+        logger.info(f"Latest date in metadata: {latest_date.date() if latest_date else 'Unknown'}")
         today = datetime.now().date()
         if latest_date.date() < today:
             run_downloader(latest_date - timedelta(days=1), today)
-            print("Download and packaging complete. Ready to upload new packages.")
-            print("All done. New packages are ready in ./packages. Upload is starting.")
+            logger.info("Download and packaging complete. Ready to upload new packages.")
+            logger.info("All done. New packages are ready in ./packages. Upload is starting.")
             upload_new_zips_to_s3()
         else:
-            print("No new data to fetch.")
+            logger.info("No new data to fetch.")
         
         # Clean up LOCAL_DIR after processing
         if os.path.exists(LOCAL_DIR):
-            print(f"Cleaning up local data directory {LOCAL_DIR}...")
+            logger.info(f"Cleaning up local data directory {LOCAL_DIR}...")
             import shutil
             shutil.rmtree(LOCAL_DIR, ignore_errors=True)
-            print(f"✅ Local data directory deleted")
+            logger.info(f"✅ Local data directory deleted")
     else:
         run(
             args.start_date,
