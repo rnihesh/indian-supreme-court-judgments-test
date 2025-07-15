@@ -242,10 +242,10 @@ def generate_tasks(
         yield SCDateTask(from_date, to_date)
 
 
-def process_task(task):
+def process_task(task, archive_manager=None):
     """Process a single date task"""
     try:
-        downloader = Downloader(task)
+        downloader = Downloader(task, archive_manager)
         downloader.download()
     except Exception as e:
         logger.error(f"Error processing task {task}: {e}")
@@ -253,7 +253,7 @@ def process_task(task):
 
 
 def run(
-    start_date=None, end_date=None, day_step=1, max_workers=5, package_on_startup=True
+    start_date=None, end_date=None, day_step=1, max_workers=5, package_on_startup=True, archive_manager=None
 ):
     """
     Run the downloader with optional parameters using Python's multiprocessing
@@ -286,7 +286,7 @@ def run(
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # map automatically consumes the iterator and processes tasks in parallel
         # it returns results in the same order as the input iterator
-        for i, result in enumerate(executor.map(process_task, tasks)):
+        for i, result in enumerate(executor.map(lambda task: process_task(task, archive_manager), tasks)):
             # process_task doesn't return anything, so we're just tracking progress
             logger.info(f"Completed task {i+1}")
 
@@ -309,8 +309,58 @@ def run(
             traceback.print_exc()
 
 
+class S3ArchiveManager:
+    def __init__(self, s3_bucket, s3_prefix, local_dir):
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
+        self.local_dir = Path(local_dir)
+        self.s3 = boto3.client('s3')
+        self.archives = {}
+
+    def __enter__(self):
+        self.local_dir.mkdir(parents=True, exist_ok=True)
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.upload_archives()
+
+    def get_archive(self, year, archive_type):
+        archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+        if archive_name in self.archives:
+            return self.archives[archive_name]
+
+        local_path = self.local_dir / archive_name
+        s3_key = f"{self.s3_prefix}{archive_name}"
+
+        try:
+            self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+            logger.info(f"Downloading existing archive: {s3_key}")
+            self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+        except self.s3.exceptions.ClientError as e:
+            if '404' in str(e):
+                logger.info(f"Archive not found on S3, creating new one: {s3_key}")
+            else:
+                raise
+
+        archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
+        self.archives[archive_name] = archive
+        return archive
+
+    def add_to_archive(self, year, archive_type, filename, content):
+        archive = self.get_archive(year, archive_type)
+        archive.writestr(filename, content)
+
+    def upload_archives(self):
+        for archive_name, archive in self.archives.items():
+            archive.close()
+            local_path = self.local_dir / archive_name
+            s3_key = f"{self.s3_prefix}{archive_name}"
+            logger.info(f"Uploading archive: {s3_key}")
+            self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
+
+
 class Downloader:
-    def __init__(self, task: SCDateTask):
+    def __init__(self, task: SCDateTask, archive_manager: S3ArchiveManager):
         self.task = task
         self.root_url = "https://scr.sci.gov.in"
         self.search_url = f"{self.root_url}/scrsearch/?p=pdf_search/home/"
@@ -330,6 +380,7 @@ class Downloader:
         self.session_id = None
         self.ecourts_token = None
         self.tar_checker = YearlyFileChecker()
+        self.archive_manager = archive_manager
 
     def _results_exist_in_search_response(self, res_dict):
         results_exist = (
@@ -387,14 +438,7 @@ class Downloader:
                 "scraped_at": datetime.now().isoformat(),
             }
 
-            # Get final path and save directly
-            final_metadata_path = self.tar_checker.get_metadata_path(
-                year, metadata_filename
-            )
-            final_metadata_path.parent.mkdir(parents=True, exist_ok=True)
-
-            with open(final_metadata_path, "w") as f:
-                json.dump(order_metadata, f, indent=2)
+            self.archive_manager.add_to_archive(year, "metadata", metadata_filename, json.dumps(order_metadata, indent=2))
 
         # Download PDFs for each language
         pdfs_downloaded = 0
@@ -405,24 +449,17 @@ class Downloader:
             if self.tar_checker.pdf_exists(year, pdf_filename, lang_code):
                 continue  # Skip download
 
-            # Get final path and download directly
-            final_pdf_path = self.tar_checker.get_pdf_path(
-                year, pdf_filename, lang_code
-            )
-            final_pdf_path.parent.mkdir(parents=True, exist_ok=True)
-
             try:
-                success = self.download_pdf_to_file(final_pdf_path, pdf_info, lang_code)
-                if success:
+                pdf_content = self.download_pdf(pdf_info, lang_code)
+                if pdf_content:
+                    archive_type = "english" if lang_code == "" else "regional"
+                    self.archive_manager.add_to_archive(year, archive_type, pdf_filename, pdf_content)
                     pdfs_downloaded += 1
             except Exception as e:
                 logger.error(
                     f"Error downloading {pdf_filename}: {e}, task: {self.task}"
                 )
                 traceback.print_exc()
-                # Clean up partial file on error
-                if final_pdf_path.exists():
-                    final_pdf_path.unlink()
 
         return pdfs_downloaded
 
@@ -786,8 +823,8 @@ class Downloader:
             logger.error(f"Error in download method: {e}")
             traceback.print_exc()
 
-    def download_pdf_to_file(self, final_pdf_path, pdf_info, lang_code):
-        """Download PDF directly to specified final file path"""
+    def download_pdf(self, pdf_info, lang_code):
+        """Download PDF and return its content"""
         val = pdf_info.get("val", "0")
         citation_year = pdf_info.get("citation_year", "")
         nc_display = pdf_info.get("nc_display", "")
@@ -807,7 +844,7 @@ class Downloader:
 
         if "outputfile" not in pdf_link_response.json():
             logger.error(f"Error downloading pdf: {pdf_link_response.json()}")
-            return False
+            return None
 
         pdf_download_link = pdf_link_response.json()["outputfile"]
         pdf_response = requests.request(
@@ -821,13 +858,9 @@ class Downloader:
         # Validate response
         no_of_bytes = len(pdf_response.content)
         if no_of_bytes == 0 or no_of_bytes == 315:  # Empty or 404 response
-            return False
+            return None
 
-        # Save directly to final path
-        with open(final_pdf_path, "wb") as f:
-            f.write(pdf_response.content)
-
-        return True
+        return pdf_response.content
 
     def get_pdf_filename(self, path, lang_code):
         """Get standardized PDF filename"""
@@ -1066,292 +1099,7 @@ def run_downloader(start_date, end_date):
         end_date=end_date.strftime("%Y-%m-%d")
     )
 
-def upload_new_zips_to_s3():
-    """
-    Upload new packages to S3 by appending to existing zip files and updating index.json files.
-    Specifically handles the three types: regional, English, and metadata packages.
-    """
-    import shutil
-    import threading
-    import tempfile
-    from concurrent.futures import ThreadPoolExecutor
-    
-    # Define progress tracking class once
-    class ProgressPercentage:
-        def __init__(self, filename, desc=None):
-            self._filename = os.path.basename(filename)
-            self._size = os.path.getsize(filename)
-            self._seen_so_far = 0
-            self._lock = threading.Lock()
-            self._pbar = tqdm(
-                total=self._size, 
-                unit='B', 
-                unit_scale=True, 
-                desc=desc or f"Uploading {self._filename}"
-            )
 
-        def __call__(self, bytes_amount):
-            with self._lock:
-                self._seen_so_far += bytes_amount
-                self._pbar.update(bytes_amount)
-                if self._seen_so_far >= self._size:
-                    self._pbar.close()
-    
-    # Merge zip helper function
-    def merge_zip_files(s3_path, local_path, output_path, new_files=None):
-        """Efficiently merge zip files, prioritizing newer versions of files"""
-        with zipfile.ZipFile(s3_path, 'r') as s3_zip:
-            with zipfile.ZipFile(local_path, 'r') as local_zip:
-                with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as merged_zip:
-                    # Get file info from both zips
-                    s3_files_info = {info.filename: info.date_time for info in s3_zip.infolist()}
-                    local_files_info = {info.filename: info.date_time for info in local_zip.infolist()}
-                    
-                    # Copy files from S3 zip (skipping if local has newer version)
-                    for item in tqdm(s3_zip.namelist(), desc=f"Merging files from S3", unit="file"):
-                        if item in local_files_info and local_files_info[item] > s3_files_info[item]:
-                            continue
-                        merged_zip.writestr(item, s3_zip.read(item))
-                    
-                    # Copy new/updated files from local zip
-                    files_to_add = new_files if new_files else local_zip.namelist()
-                    for item in tqdm(files_to_add, desc=f"Adding new/updated files", unit="file"):
-                        try:
-                            if item not in s3_files_info or local_files_info[item] >= s3_files_info[item]:
-                                merged_zip.writestr(item, local_zip.read(item))
-                        except KeyError as e:
-                            logger.warning(f"{item} not found in local zip but listed in index")
-    
-    # Process a single package
-    def process_package(local_zip_name, package_type):
-        try:
-            if not local_zip_name.endswith(".zip"):
-                return package_type, False
-                
-            local_index = local_zip_name.replace(".zip", ".index.json")
-            local_zip_path = os.path.join(PACKAGES_DIR, local_zip_name)
-            local_index_path = os.path.join(PACKAGES_DIR, local_index)
-            
-            # Check if both files exist locally
-            if not os.path.exists(local_index_path):
-                logger.warning(f"Skipping {local_zip_name}: Missing index file")
-                return package_type, False
-            
-            # Load local index
-            with open(local_index_path, 'r') as f:
-                local_index_data = json.load(f)
-            
-            # Determine S3 keys
-            s3_zip_key = f"{S3_PREFIX}{local_zip_name}"
-            s3_index_key = f"{S3_PREFIX}{local_index}"
-            
-            # Temp paths for this package
-            temp_subdir = os.path.join(temp_dir, package_type)
-            os.makedirs(temp_subdir, exist_ok=True)
-            s3_index_path = os.path.join(temp_subdir, local_index)
-            s3_zip_path = os.path.join(temp_subdir, local_zip_name)
-            merged_zip_path = os.path.join(temp_subdir, f"merged_{local_zip_name}")
-            
-            try:
-                # Try to download existing index file
-                logger.info(f"Downloading index file {s3_index_key}...")
-                s3.download_file(S3_BUCKET, s3_index_key, s3_index_path)
-                
-                with open(s3_index_path, 'r') as f:
-                    s3_index_data = json.load(f)
-                
-                # Merge file lists
-                s3_files = set(s3_index_data.get("files", []))
-                local_files = set(local_index_data.get("files", []))
-                all_files = sorted(list(s3_files | local_files))
-                new_files = list(local_files - s3_files)
-                
-                # Update index with new data
-                merged_index = s3_index_data.copy()
-                merged_index["file_count"] = len(all_files)
-                merged_index["files"] = all_files
-                merged_index["created_at"] = s3_index_data.get("created_at", datetime.now().isoformat())
-                merged_index["updated_at"] = datetime.now().isoformat()
-                
-                # Save merged index
-                with open(s3_index_path, 'w') as f:
-                    json.dump(merged_index, f, indent=2)
-                
-                if not new_files:
-                    logger.info(f"No new files to add to {local_zip_name}")
-                    logger.info(f"Uploading updated index with new timestamp to {s3_index_key}")
-                    
-                    # Upload updated index file even if there are no new zip contents
-                    s3.upload_file(
-                        s3_index_path, 
-                        S3_BUCKET, 
-                        s3_index_key,
-                        Callback=ProgressPercentage(s3_index_path)
-                    )
-                    return package_type, True
-                
-                # Download existing zip
-                logger.info(f"Downloading existing zip {s3_zip_key}...")
-                s3.download_file(S3_BUCKET, s3_zip_key, s3_zip_path)
-                
-                # Merge zip files
-                merge_zip_files(s3_zip_path, local_zip_path, merged_zip_path, new_files)
-                
-                # Upload merged files
-                logger.info(f"Uploading merged {local_zip_name} with {len(new_files)} new files to {s3_zip_key}")
-                s3.upload_file(
-                    merged_zip_path, 
-                    S3_BUCKET, 
-                    s3_zip_key,
-                    Callback=ProgressPercentage(merged_zip_path)
-                )
-                
-                logger.info(f"Uploading updated {local_index} to {s3_index_key}")
-                s3.upload_file(
-                    s3_index_path, 
-                    S3_BUCKET, 
-                    s3_index_key,
-                    Callback=ProgressPercentage(s3_index_path)
-                )
-                return package_type, True
-                
-            except s3.exceptions.ClientError as e:
-                if 'HeadObject' in str(e) or '404' in str(e):
-                    # File doesn't exist in S3, upload directly
-                    logger.info(f"Uploading new {local_zip_name} to {s3_zip_key}")
-                    
-                    # Upload with progress bar
-                    s3.upload_file(
-                        local_zip_path, 
-                        S3_BUCKET, 
-                        s3_zip_key,
-                        Callback=ProgressPercentage(local_zip_path)
-                    )
-                    
-                    logger.info(f"Uploading new {local_index} to {s3_index_key}")
-                    s3.upload_file(
-                        local_index_path, 
-                        S3_BUCKET, 
-                        s3_index_key,
-                        Callback=ProgressPercentage(local_index_path)
-                    )
-                    return package_type, True
-                else:
-                    # Some other error occurred
-                    logger.error(f"Error processing {local_zip_name}: {str(e)}")
-                    return package_type, False
-        except Exception as e:
-            logger.error(f"Error processing package {local_zip_name}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            return package_type, False
-    
-    # MAIN FUNCTION BODY STARTS HERE
-    temp_dir = "temp_merge"
-    os.makedirs(temp_dir, exist_ok=True)
-    
-    # Track which types we've processed
-    processed_types = {
-        "regional": False,
-        "english": False,
-        "metadata": False
-    }
-    
-    # Check if packages directory exists and has files
-    if not os.path.exists(PACKAGES_DIR):
-        logger.error(f"Packages directory '{PACKAGES_DIR}' not found")
-        return
-    
-    package_files = [f for f in os.listdir(PACKAGES_DIR) if f.endswith('.zip')]
-    if not package_files:
-        logger.warning(f"No zip files found in '{PACKAGES_DIR}'")
-        return
-    
-    try:
-        # First, check if AWS credentials are configured
-        try:
-            # Try to get credentials - this will raise an exception if none are available
-            session = boto3.Session()
-            credentials = session.get_credentials()
-            if credentials is None:
-                logger.error("No AWS credentials found.")
-                return
-            
-            # Create S3 client with credentials from profile
-            s3 = session.client('s3')
-            logger.info("Successfully authenticated with AWS")
-        except Exception as e:
-            logger.error(f"Failed to initialize S3 client: {e}")
-            return
-            
-        # Prepare package tasks
-        package_tasks = []
-        for local_zip in os.listdir(PACKAGES_DIR):
-            if not local_zip.endswith(".zip"):
-                continue
-                
-            # Determine package type
-            if "regional" in local_zip:
-                package_type = "regional"
-            elif "english" in local_zip:
-                package_type = "english"
-            elif "metadata" in local_zip:
-                package_type = "metadata"
-            else:
-                logger.warning(f"Unknown package type for {local_zip}, processing anyway")
-                package_type = "unknown"
-                
-            package_tasks.append((local_zip, package_type))
-        
-        # Process packages with progress tracking
-        with tqdm(total=len(package_tasks), desc="Processing packages") as pbar:
-            # For smaller datasets, process sequentially
-            if len(package_tasks) <= 3:
-                for local_zip, package_type in package_tasks:
-                    pkg_type, success = process_package(local_zip, package_type)
-                    processed_types[pkg_type] = success
-                    pbar.update(1)
-            else:
-                # For larger datasets, process in parallel
-                with ThreadPoolExecutor(max_workers=3) as executor:
-                    futures = [
-                        executor.submit(process_package, local_zip, package_type)
-                        for local_zip, package_type in package_tasks
-                    ]
-                    
-                    for future in concurrent.futures.as_completed(futures):
-                        try:
-                            pkg_type, success = future.result()
-                            if success:
-                                processed_types[pkg_type] = True
-                        except Exception as e:
-                            logger.error(f"Error in worker thread: {e}")
-                        pbar.update(1)
-    
-    except Exception as e:
-        logger.error(f"Error during upload process: {str(e)}")
-        import traceback
-        traceback.print_exc()
-    
-    finally:
-        # Report on which types were processed
-        for pkg_type, was_processed in processed_types.items():
-            if was_processed:
-                logger.info(f"✅ {pkg_type.capitalize()} package processed successfully")
-            else:
-                logger.warning(f"⚠️ No {pkg_type} package was processed")
-                
-        # Clean up temporary files
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        logger.info("Upload process completed")
-        
-        # Delete packages directory after successful upload
-        if all(processed_types.values()):
-            logger.info("All package types processed successfully. Cleaning up packages directory...")
-            shutil.rmtree(PACKAGES_DIR, ignore_errors=True)
-            logger.info(f"✅ Packages directory {PACKAGES_DIR} deleted")
-        else:
-            logger.warning("⚠️ Not all package types were processed. Keeping packages directory for further processing.")
 
 def get_latest_date_from_metadata(force_check_files=False):
     """
@@ -1420,16 +1168,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.sync_s3:
-        latest_date = get_latest_date_from_metadata()
-        logger.info(f"Latest date in metadata: {latest_date.date() if latest_date else 'Unknown'}")
-        today = datetime.now().date()
-        if latest_date.date() < today:
-            run_downloader(latest_date - timedelta(days=1), today)
-            logger.info("Download and packaging complete. Ready to upload new packages.")
-            logger.info("All done. New packages are ready in ./packages. Upload is starting.")
-            upload_new_zips_to_s3()
-        else:
-            logger.info("No new data to fetch.")
+        with S3ArchiveManager(S3_BUCKET, S3_PREFIX, LOCAL_DIR) as archive_manager:
+            latest_date = get_latest_date_from_metadata()
+            logger.info(f"Latest date in metadata: {latest_date.date() if latest_date else 'Unknown'}")
+            today = datetime.now().date()
+            if latest_date.date() < today:
+                run(
+                    start_date=(latest_date - timedelta(days=1)).strftime("%Y-%m-%d"),
+                    end_date=today.strftime("%Y-%m-%d"),
+                    archive_manager=archive_manager
+                )
+                logger.info("Download and packaging complete. Ready to upload new packages.")
+            else:
+                logger.info("No new data to fetch.")
         
         # Clean up LOCAL_DIR after processing
         if os.path.exists(LOCAL_DIR):
