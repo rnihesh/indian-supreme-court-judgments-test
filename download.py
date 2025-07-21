@@ -253,7 +253,7 @@ def process_task(task, archive_manager=None):
 
 
 def run(
-    start_date=None, end_date=None, day_step=1, max_workers=3, package_on_startup=True, archive_manager=None
+    start_date=None, end_date=None, day_step=1, max_workers=5, package_on_startup=True, archive_manager=None
 ):
     """
     Run the downloader with optional parameters using Python's multiprocessing
@@ -319,7 +319,6 @@ class S3ArchiveManager:
         self.s3 = boto3.client('s3')
         self.archives = {}
         self.indexes = {}
-        self.locks = {}  # Dictionary to store locks for each archive
 
     def __enter__(self):
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -332,96 +331,71 @@ class S3ArchiveManager:
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
         index_name = f"sc-judgments-{year}-{archive_type}.index.json"
 
-        # Create lock if it doesn't exist
-        if archive_name not in self.locks:
-            self.locks[archive_name] = threading.Lock()
+        if archive_name in self.archives:
+            return self.archives[archive_name]
 
-        # Acquire lock for this specific archive
-        with self.locks[archive_name]:
-            if archive_name in self.archives:
-                return self.archives[archive_name]
+        local_path = self.local_dir / archive_name
+        s3_key = f"{self.s3_prefix}{archive_name}"
+        index_s3_key = f"{self.s3_prefix}{index_name}"
 
-            local_path = self.local_dir / archive_name
-            s3_key = f"{self.s3_prefix}{archive_name}"
-            index_s3_key = f"{self.s3_prefix}{index_name}"
+        try:
+            self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+            logger.info(f"Downloading existing archive: {s3_key}")
+            self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+            
+            # Download index
+            index_local_path = self.local_dir / index_name
+            self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
+            with open(index_local_path, 'r') as f:
+                self.indexes[archive_name] = json.load(f)
 
-            try:
-                self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
-                logger.info(f"Downloading existing archive: {s3_key}")
-                self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
-                
-                # Download index
-                index_local_path = self.local_dir / index_name
-                self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
-                with open(index_local_path, 'r') as f:
-                    self.indexes[archive_name] = json.load(f)
+        except self.s3.exceptions.ClientError as e:
+            if '404' in str(e):
+                logger.info(f"Archive not found on S3, creating new one: {s3_key}")
+                self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
+            else:
+                raise
 
-            except self.s3.exceptions.ClientError as e:
-                if '404' in str(e):
-                    logger.info(f"Archive not found on S3, creating new one: {s3_key}")
-                    self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
-                else:
-                    raise
-
-            archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
-            self.archives[archive_name] = archive
-            return archive
+        archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
+        self.archives[archive_name] = archive
+        return archive
 
     def add_to_archive(self, year, archive_type, filename, content):
+        archive = self.get_archive(year, archive_type)
+        archive.writestr(filename, content)
+        
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        
-        # Create lock if needed
-        if archive_name not in self.locks:
-            self.locks[archive_name] = threading.Lock()
-        
-        # Synchronize access to this archive
-        with self.locks[archive_name]:
-            archive = self.get_archive(year, archive_type)
-            archive.writestr(filename, content)
-            self.indexes[archive_name]["files"].append(filename)
+        self.indexes[archive_name]["files"].append(filename)
 
     def file_exists(self, year, archive_type, filename):
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+        if archive_name not in self.indexes:
+            self.get_archive(year, archive_type) # This will load the index
         
-        # Create lock if needed
-        if archive_name not in self.locks:
-            self.locks[archive_name] = threading.Lock()
-        
-        # Synchronize access
-        with self.locks[archive_name]:
-            if archive_name not in self.indexes:
-                self.get_archive(year, archive_type) # This will load the index
-            
-            return filename in self.indexes[archive_name]["files"]
+        return filename in self.indexes[archive_name]["files"]
 
     def upload_archives(self):
         for archive_name, archive in self.archives.items():
-            # Create lock if needed
-            if archive_name not in self.locks:
-                self.locks[archive_name] = threading.Lock()
+            archive.close()
+            local_path = self.local_dir / archive_name
+            s3_key = f"{self.s3_prefix}{archive_name}"
             
-            # Synchronize access
-            with self.locks[archive_name]:
-                archive.close()
-                local_path = self.local_dir / archive_name
-                s3_key = f"{self.s3_prefix}{archive_name}"
-                
-                # Update and write index
-                index_name = archive_name.replace(".zip", ".index.json")
-                index_local_path = self.local_dir / index_name
-                index_data = self.indexes[archive_name]
-                index_data["file_count"] = len(index_data["files"])
-                index_data["updated_at"] = datetime.now(IST).isoformat()
+            # Update and write index
+            index_name = archive_name.replace(".zip", ".index.json")
+            index_local_path = self.local_dir / index_name
+            index_data = self.indexes[archive_name]
+            index_data["file_count"] = len(index_data["files"])
+            index_data["updated_at"] = datetime.now(IST).isoformat()
 
-                with open(index_local_path, 'w') as f:
-                    json.dump(index_data, f, indent=2)
+            with open(index_local_path, 'w') as f:
+                json.dump(index_data, f, indent=2)
 
-                logger.info(f"Uploading archive: {s3_key}")
-                self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
-                
-                index_s3_key = f"{self.s3_prefix}{index_name}"
-                logger.info(f"Uploading index: {index_s3_key}")
-                self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
+            logger.info(f"Uploading archive: {s3_key}")
+            self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
+            
+            index_s3_key = f"{self.s3_prefix}{index_name}"
+            logger.info(f"Uploading index: {index_s3_key}")
+            self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
 
 
 class Downloader:
@@ -467,81 +441,66 @@ class Downloader:
         return search_payload
 
     def process_result_row(self, row, row_pos):
-        try:
-            html = row[1]
-            soup = BeautifulSoup(html, "html.parser")
+        html = row[1]
+        soup = BeautifulSoup(html, "html.parser")
 
-            # First check for direct PDF button (single language) with role="link"
-            button = soup.find("button", {"role": "link"})
-            assert (
-                button and "onclick" in button.attrs
-            ), f"No PDF button found, task: {self.task}"
-            pdf_info = self.extract_pdf_fragment_from_button(button["onclick"])
-            assert pdf_info, f"No PDF info found, task: {self.task}"
+        # First check for direct PDF button (single language) with role="link"
+        button = soup.find("button", {"role": "link"})
+        assert (
+            button and "onclick" in button.attrs
+        ), f"No PDF button found, task: {self.task}"
+        pdf_info = self.extract_pdf_fragment_from_button(button["onclick"])
+        assert pdf_info, f"No PDF info found, task: {self.task}"
 
-            # Check for multi-language selector
-            select_element = soup.find("select", {"name": "language"})
-            if select_element:
-                language_codes = [
-                    option.get("value") for option in select_element.find_all("option")
-                ]
-            else:
-                language_codes = [""]
+        # Check for multi-language selector
+        select_element = soup.find("select", {"name": "language"})
+        if select_element:
+            language_codes = [
+                option.get("value") for option in select_element.find_all("option")
+            ]
+        else:
+            language_codes = [""]
 
-            pdf_info["language_codes"] = language_codes
+        pdf_info["language_codes"] = language_codes
 
-            year = extract_year_from_path(pdf_info["path"])
+        year = extract_year_from_path(pdf_info["path"])
 
-            # Check if metadata already exists
-            metadata_filename = f"{pdf_info['path']}.json"
-            if not self.archive_manager.file_exists(year, "metadata", metadata_filename):
-                # Create metadata
-                order_metadata = {
-                    "raw_html": html,
-                    "path": pdf_info["path"],
-                    "citation_year": pdf_info.get("citation_year", ""),
-                    "nc_display": pdf_info.get("nc_display", ""),
-                    "scraped_at": datetime.now().isoformat(),
-                }
+        # Check if metadata already exists
+        metadata_filename = f"{pdf_info['path']}.json"
+        if not self.archive_manager.file_exists(year, "metadata", metadata_filename):
+            # Create metadata
+            order_metadata = {
+                "raw_html": html,
+                "path": pdf_info["path"],
+                "citation_year": pdf_info.get("citation_year", ""),
+                "nc_display": pdf_info.get("nc_display", ""),
+                "scraped_at": datetime.now().isoformat(),
+            }
 
-                self.archive_manager.add_to_archive(year, "metadata", metadata_filename, json.dumps(order_metadata, indent=2))
+            self.archive_manager.add_to_archive(year, "metadata", metadata_filename, json.dumps(order_metadata, indent=2))
 
-            # Download PDFs for each language
-            pdfs_downloaded = 0
-            for lang_code in language_codes:
-                pdf_filename = self.get_pdf_filename(pdf_info["path"], lang_code)
-                archive_type = "english" if lang_code == "" else "regional"
+        # Download PDFs for each language
+        pdfs_downloaded = 0
+        for lang_code in language_codes:
+            pdf_filename = self.get_pdf_filename(pdf_info["path"], lang_code)
+            archive_type = "english" if lang_code == "" else "regional"
 
-                # Check if PDF already exists
-                if self.archive_manager.file_exists(year, archive_type, pdf_filename):
-                    continue  # Skip download
+            # Check if PDF already exists
+            if self.archive_manager.file_exists(year, archive_type, pdf_filename):
+                continue  # Skip download
 
-                try:
-                    pdf_content = self.download_pdf(pdf_info, lang_code)
-                    if pdf_content:
-                        self.archive_manager.add_to_archive(year, archive_type, pdf_filename, pdf_content)
-                        pdfs_downloaded += 1
-                except Exception as e:
-                    logger.error(
-                        f"Error downloading {pdf_filename}: {e}, task: {self.task}"
-                    )
-                    traceback.print_exc()
+            try:
+                pdf_content = self.download_pdf(pdf_info, lang_code)
+                if pdf_content:
+                    self.archive_manager.add_to_archive(year, archive_type, pdf_filename, pdf_content)
+                    pdfs_downloaded += 1
+            except Exception as e:
+                logger.error(
+                    f"Error downloading {pdf_filename}: {e}, task: {self.task}"
+                )
+                traceback.print_exc()
 
-            return pdfs_downloaded
-        except ValueError as e:
-            if "Can't write to ZIP archive while an open writing handle exists" in str(e):
-                logger.warning(f"ZIP concurrency issue, will retry: {e}")
-                # Sleep briefly to allow other operations to complete
-                time.sleep(0.5)
-                # Retry this operation
-                return self.process_result_row(row, row_pos)
-            else:
-                # Re-raise other ValueErrors
-                raise
-        except Exception as e:
-            logger.error(f"Error processing row {row_pos}: {e}")
-            traceback.print_exc()
-            return 0  # No PDFs downloaded in case of error
+        return pdfs_downloaded
 
     def extract_pdf_fragment_from_button(self, onclick_attr):
         """Extract PDF fragment from button onclick attribute"""
@@ -749,7 +708,7 @@ class Downloader:
                 return response
 
             except requests.exceptions.SSLError as e:
-                if attempt < max_retries - 1: # Don't sleep on the last attempt
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
                     delay = base_delay * (2**attempt)  # Exponential backoff
                     logger.warning(
                         f"SSL Error occurred (attempt {attempt + 1}/{max_retries}): {str(e)}"
@@ -761,7 +720,7 @@ class Downloader:
                     logger.error(f"SSL Error after {max_retries} attempts: {str(e)}")
                     raise
             except requests.exceptions.RequestException as e:
-                if attempt < max_retries - 1: # Don't sleep on the last attempt
+                if attempt < max_retries - 1:  # Don't sleep on the last attempt
                     delay = base_delay * (2**attempt)  # Exponential backoff
                     logger.warning(
                         f"Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}"
