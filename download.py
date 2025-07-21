@@ -319,6 +319,7 @@ class S3ArchiveManager:
         self.s3 = boto3.client('s3')
         self.archives = {}
         self.indexes = {}
+        self.lock = threading.RLock()  # Reentrant lock for nested calls
 
     def __enter__(self):
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -361,18 +362,20 @@ class S3ArchiveManager:
         return archive
 
     def add_to_archive(self, year, archive_type, filename, content):
-        archive = self.get_archive(year, archive_type)
-        archive.writestr(filename, content)
-        
-        archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        self.indexes[archive_name]["files"].append(filename)
+        with self.lock:
+            archive = self.get_archive(year, archive_type)
+            archive.writestr(filename, content)
+            
+            archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+            self.indexes[archive_name]["files"].append(filename)
 
     def file_exists(self, year, archive_type, filename):
-        archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        if archive_name not in self.indexes:
-            self.get_archive(year, archive_type) # This will load the index
-        
-        return filename in self.indexes[archive_name]["files"]
+        with self.lock:
+            archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+            if archive_name not in self.indexes:
+                self.get_archive(year, archive_type) # This will load the index
+            
+            return filename in self.indexes[archive_name]["files"]
 
     def upload_archives(self):
         for archive_name, archive in self.archives.items():
