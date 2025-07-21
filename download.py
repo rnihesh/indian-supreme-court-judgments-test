@@ -314,9 +314,6 @@ class S3ArchiveManager:
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.local_dir = Path(local_dir)
-        # session = boto3.Session(profile_name="dattam-supreme")
-        # self.s3 = session.client('s3', config=Config())
-        # self.s3 = boto3.client('s3')
         # Configure connection pooling with higher max connections
         boto_config = BotoConfig(
             max_pool_connections=25,  # Increase from default 10
@@ -326,6 +323,17 @@ class S3ArchiveManager:
         self.archives = {}
         self.indexes = {}
         self.locks = {}  # Add locks for thread synchronization
+        
+    def __enter__(self):
+        """Support for context manager protocol"""
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Clean up when exiting context manager"""
+        # Close and upload all archives
+        self.upload_archives()
+        # Return False to propagate exceptions
+        return False
 
     def get_archive(self, year, archive_type):
         """Get or create archive with thread synchronization"""
@@ -735,7 +743,7 @@ class Downloader:
                 return response
 
             except requests.exceptions.SSLError as e:
-                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                if attempt < max_retries - 1: # Don't sleep on the last attempt
                     delay = base_delay * (2**attempt)  # Exponential backoff
                     logger.warning(
                         f"SSL Error occurred (attempt {attempt + 1}/{max_retries}): {str(e)}"
@@ -747,7 +755,7 @@ class Downloader:
                     logger.error(f"SSL Error after {max_retries} attempts: {str(e)}")
                     raise
             except requests.exceptions.RequestException as e:
-                if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                if attempt < max_retries - 1: # Don't sleep on the last attempt
                     delay = base_delay * (2**attempt)  # Exponential backoff
                     logger.warning(
                         f"Request failed (attempt {attempt + 1}/{max_retries}): {str(e)}"
