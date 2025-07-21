@@ -703,42 +703,17 @@ class Downloader:
                     verify=False,
                 )
 
-                # if response is json
+                # Try to parse JSON response safely
                 try:
                     response_dict = response.json()
-                except Exception as e:
-                    response_dict = {}
-
-                self.update_session_id(response)
-
-                if url == self.captcha_token_url:
-                    return response
-
-                if (
-                    "filename" in response_dict
-                    and "securimage_show" in response_dict["filename"]
-                ):
-                    return self.solve_pdf_download_captcha(response_dict, payload)
-
-                elif response_dict.get("session_expire") == "Y":
-                    self.refresh_token()
-                    return self.request_api(method, url, payload, **kwargs)
-
-                elif "errormsg" in response_dict:
-                    logger.error(f"Error {response_dict['errormsg']}")
-                    self.refresh_token()
-                    return self.request_api(method, url, payload, **kwargs)
-                elif response.text.strip() == "":
-                    self.refresh_token()
-                    logger.error(f"Empty response, task: {self.task.id}")
-                    return self.request_api(method, url, payload, **kwargs)
-
-                elif "curl_error() expects exactly 1 argument" in response.text:
-                    logger.warning(
-                        f"Server-side PHP error detected, retrying: {self.task.id}"
-                    )
-                    time.sleep(2)  # Brief delay before retry
-                    return self.request_api(method, url, payload, **kwargs)
+                except ValueError as json_err:
+                    logger.warning(f"Invalid JSON response: {str(json_err)}, retrying: {self.task.id}")
+                    if attempt < max_retries - 1:
+                        time.sleep(2)  # Brief delay before retry
+                        return self.request_api(method, url, payload, **kwargs)
+                    else:
+                        logger.error(f"Failed to parse JSON after {max_retries} attempts: {str(json_err)}")
+                        raise
 
                 return response
 
@@ -1263,11 +1238,11 @@ if __name__ == "__main__":
                 logger.info("No new data to fetch.")
         
         # Clean up LOCAL_DIR after processing
-        if os.path.exists(LOCAL_DIR):
-            logger.info(f"Cleaning up local data directory {LOCAL_DIR}...")
-            import shutil
-            shutil.rmtree(LOCAL_DIR, ignore_errors=True)
-            logger.info(f"✅ Local data directory deleted")
+        # if os.path.exists(LOCAL_DIR):
+        #     logger.info(f"Cleaning up local data directory {LOCAL_DIR}...")
+        #     import shutil
+        #     shutil.rmtree(LOCAL_DIR, ignore_errors=True)
+        #     logger.info(f"✅ Local data directory deleted")
     else:
         run(
             args.start_date,
