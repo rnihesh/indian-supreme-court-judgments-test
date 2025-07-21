@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 import lxml.html as LH
 import urllib
-import easyocr
+# import easyocr
 import logging
 import threading
 import concurrent.futures
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*pin_memory.*not supported on MPS.*")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-reader = easyocr.Reader(["en"])
+# reader = easyocr.Reader(["en"])
 
 root_url = "https://scr.sci.gov.in"
 output_dir = Path("./sc_data")
