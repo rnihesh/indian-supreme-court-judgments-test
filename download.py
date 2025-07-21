@@ -319,6 +319,7 @@ class S3ArchiveManager:
         self.s3 = boto3.client('s3')
         self.archives = {}
         self.indexes = {}
+        self.locks = {}  # Add a dictionary to store locks for each archive
 
     def __enter__(self):
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -331,71 +332,93 @@ class S3ArchiveManager:
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
         index_name = f"sc-judgments-{year}-{archive_type}.index.json"
 
-        if archive_name in self.archives:
-            return self.archives[archive_name]
+        # Create a lock for this archive if it doesn't exist
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
 
-        local_path = self.local_dir / archive_name
-        s3_key = f"{self.s3_prefix}{archive_name}"
-        index_s3_key = f"{self.s3_prefix}{index_name}"
+        # Acquire the lock for this specific archive
+        with self.locks[archive_name]:
+            if archive_name in self.archives:
+                return self.archives[archive_name]
 
-        try:
-            self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
-            logger.info(f"Downloading existing archive: {s3_key}")
-            self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
-            
-            # Download index
-            index_local_path = self.local_dir / index_name
-            self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
-            with open(index_local_path, 'r') as f:
-                self.indexes[archive_name] = json.load(f)
+            local_path = self.local_dir / archive_name
+            s3_key = f"{self.s3_prefix}{archive_name}"
+            index_s3_key = f"{self.s3_prefix}{index_name}"
 
-        except self.s3.exceptions.ClientError as e:
-            if '404' in str(e):
-                logger.info(f"Archive not found on S3, creating new one: {s3_key}")
-                self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
-            else:
-                raise
+            try:
+                self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+                logger.info(f"Downloading existing archive: {s3_key}")
+                self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+                
+                # Download index
+                index_local_path = self.local_dir / index_name
+                self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
+                with open(index_local_path, 'r') as f:
+                    self.indexes[archive_name] = json.load(f)
 
-        archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
-        self.archives[archive_name] = archive
-        return archive
+            except self.s3.exceptions.ClientError as e:
+                if '404' in str(e):
+                    logger.info(f"Archive not found on S3, creating new one: {s3_key}")
+                    self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
+                else:
+                    raise
+
+            archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
+            self.archives[archive_name] = archive
+            return archive
 
     def add_to_archive(self, year, archive_type, filename, content):
-        archive = self.get_archive(year, archive_type)
-        archive.writestr(filename, content)
-        
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        self.indexes[archive_name]["files"].append(filename)
+        
+        # Use the lock for this specific archive
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
+            
+        with self.locks[archive_name]:
+            archive = self.get_archive(year, archive_type)
+            archive.writestr(filename, content)
+            
+            self.indexes[archive_name]["files"].append(filename)
 
     def file_exists(self, year, archive_type, filename):
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        if archive_name not in self.indexes:
-            self.get_archive(year, archive_type) # This will load the index
         
-        return filename in self.indexes[archive_name]["files"]
+        # Use the lock for this specific archive
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
+            
+        with self.locks[archive_name]:
+            if archive_name not in self.indexes:
+                self.get_archive(year, archive_type) # This will load the index
+            
+            return filename in self.indexes[archive_name]["files"]
 
     def upload_archives(self):
         for archive_name, archive in self.archives.items():
-            archive.close()
-            local_path = self.local_dir / archive_name
-            s3_key = f"{self.s3_prefix}{archive_name}"
-            
-            # Update and write index
-            index_name = archive_name.replace(".zip", ".index.json")
-            index_local_path = self.local_dir / index_name
-            index_data = self.indexes[archive_name]
-            index_data["file_count"] = len(index_data["files"])
-            index_data["updated_at"] = datetime.now(IST).isoformat()
+            if archive_name not in self.locks:
+                self.locks[archive_name] = threading.Lock()
+                
+            with self.locks[archive_name]:
+                archive.close()
+                local_path = self.local_dir / archive_name
+                s3_key = f"{self.s3_prefix}{archive_name}"
+                
+                # Update and write index
+                index_name = archive_name.replace(".zip", ".index.json")
+                index_local_path = self.local_dir / index_name
+                index_data = self.indexes[archive_name]
+                index_data["file_count"] = len(index_data["files"])
+                index_data["updated_at"] = datetime.now(IST).isoformat()
 
-            with open(index_local_path, 'w') as f:
-                json.dump(index_data, f, indent=2)
+                with open(index_local_path, 'w') as f:
+                    json.dump(index_data, f, indent=2)
 
-            logger.info(f"Uploading archive: {s3_key}")
-            self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
-            
-            index_s3_key = f"{self.s3_prefix}{index_name}"
-            logger.info(f"Uploading index: {index_s3_key}")
-            self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
+                logger.info(f"Uploading archive: {s3_key}")
+                self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
+                
+                index_s3_key = f"{self.s3_prefix}{index_name}"
+                logger.info(f"Uploading index: {index_s3_key}")
+                self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
 
 
 class Downloader:
