@@ -208,3 +208,4 @@ cython_debug/
 local_sc_judgments_data/
 
 sc_track.json
+./sc_track.json
