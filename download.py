@@ -11,7 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 import lxml.html as LH
 import urllib
-import easyocr
+# import easyocr
 import logging
 import threading
 import concurrent.futures
@@ -24,10 +24,10 @@ import colorlog
 import os
 import re
 import zipfile
-import subprocess
 import boto3
 from botocore import UNSIGNED
 from botocore.client import Config
+from botocore.config import Config as BotoConfig
 from tqdm import tqdm
 import shutil
 import tempfile
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message=".*pin_memory.*not supported on MPS.*")
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-reader = easyocr.Reader(["en"])
+# reader = easyocr.Reader(["en"])
 
 root_url = "https://scr.sci.gov.in"
 output_dir = Path("./sc_data")
@@ -316,63 +316,90 @@ class S3ArchiveManager:
         self.local_dir = Path(local_dir)
         # session = boto3.Session(profile_name="dattam-supreme")
         # self.s3 = session.client('s3', config=Config())
-        self.s3 = boto3.client('s3')
+        # self.s3 = boto3.client('s3')
+        # Configure connection pooling with higher max connections
+        boto_config = BotoConfig(
+            max_pool_connections=25,  # Increase from default 10
+            retries={'max_attempts': 3, 'mode': 'standard'}
+        )
+        self.s3 = boto3.client('s3', config=boto_config)
         self.archives = {}
         self.indexes = {}
-
-    def __enter__(self):
-        self.local_dir.mkdir(parents=True, exist_ok=True)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.upload_archives()
+        self.locks = {}  # Add locks for thread synchronization
 
     def get_archive(self, year, archive_type):
+        """Get or create archive with thread synchronization"""
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
         index_name = f"sc-judgments-{year}-{archive_type}.index.json"
-
-        if archive_name in self.archives:
-            return self.archives[archive_name]
-
-        local_path = self.local_dir / archive_name
-        s3_key = f"{self.s3_prefix}{archive_name}"
-        index_s3_key = f"{self.s3_prefix}{index_name}"
-
-        try:
-            self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
-            logger.info(f"Downloading existing archive: {s3_key}")
-            self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+        
+        # Create a lock for this archive if it doesn't exist
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
             
-            # Download index
-            index_local_path = self.local_dir / index_name
-            self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
-            with open(index_local_path, 'r') as f:
-                self.indexes[archive_name] = json.load(f)
+        # Acquire the lock before accessing the archive
+        with self.locks[archive_name]:
+            if archive_name in self.archives:
+                return self.archives[archive_name]
 
-        except self.s3.exceptions.ClientError as e:
-            if '404' in str(e):
-                logger.info(f"Archive not found on S3, creating new one: {s3_key}")
-                self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
-            else:
-                raise
+            local_path = self.local_dir / archive_name
+            s3_key = f"{self.s3_prefix}{archive_name}"
+            index_s3_key = f"{self.s3_prefix}{index_name}"
 
-        archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
-        self.archives[archive_name] = archive
-        return archive
+            try:
+                self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+                logger.info(f"Downloading existing archive: {s3_key}")
+                self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+                
+                # Download index
+                index_local_path = self.local_dir / index_name
+                self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
+                with open(index_local_path, 'r') as f:
+                    self.indexes[archive_name] = json.load(f)
+
+            except self.s3.exceptions.ClientError as e:
+                if '404' in str(e):
+                    logger.info(f"Archive not found on S3, creating new one: {s3_key}")
+                    self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
+                else:
+                    raise
+
+            archive = zipfile.ZipFile(local_path, 'a', zipfile.ZIP_DEFLATED)
+            self.archives[archive_name] = archive
+            return archive
 
     def add_to_archive(self, year, archive_type, filename, content):
-        archive = self.get_archive(year, archive_type)
-        archive.writestr(filename, content)
-        
+        """Add content to archive with thread synchronization"""
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        self.indexes[archive_name]["files"].append(filename)
+        
+        # Create a lock for this archive if it doesn't exist
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
+        
+        # Acquire the lock before modifying the archive
+        with self.locks[archive_name]:
+            archive = self.get_archive(year, archive_type)
+            archive.writestr(filename, content)
+            
+            if archive_name not in self.indexes:
+                self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
+                
+            if filename not in self.indexes[archive_name]["files"]:
+                self.indexes[archive_name]["files"].append(filename)
 
     def file_exists(self, year, archive_type, filename):
+        """Check if file exists in archive with thread synchronization"""
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
-        if archive_name not in self.indexes:
-            self.get_archive(year, archive_type) # This will load the index
         
-        return filename in self.indexes[archive_name]["files"]
+        # Create a lock for this archive if it doesn't exist
+        if archive_name not in self.locks:
+            self.locks[archive_name] = threading.Lock()
+        
+        # Acquire the lock before checking the index
+        with self.locks[archive_name]:
+            if archive_name not in self.indexes:
+                self.get_archive(year, archive_type) # This will load the index
+            
+            return filename in self.indexes[archive_name]["files"]
 
     def upload_archives(self):
         for archive_name, archive in self.archives.items():
@@ -1050,7 +1077,13 @@ def sync_latest_metadata_zip(force_refresh=True):
     If force_refresh is True, always download a fresh copy.
     """
     os.makedirs(LOCAL_DIR, exist_ok=True)
-    s3 = boto3.client('s3', config=Config(signature_version=UNSIGNED))
+    # Configure connection pooling with higher max connections
+    boto_config = BotoConfig(
+        signature_version=UNSIGNED,
+        max_pool_connections=25,  # Increase from default 10
+        retries={'max_attempts': 3, 'mode': 'standard'}
+    )
+    s3 = boto3.client('s3', config=boto_config)
     
     # First try to get current year's metadata
     current_year = datetime.now().year
