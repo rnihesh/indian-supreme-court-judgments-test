@@ -2,7 +2,7 @@ from typing import Optional, Generator
 from PIL import Image
 from captcha_solver import get_text
 import argparse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import traceback
 import re
 import json
@@ -28,7 +28,6 @@ import subprocess
 import boto3
 from botocore import UNSIGNED
 from botocore.client import Config
-from datetime import timezone
 from tqdm import tqdm
 import shutil
 import tempfile
@@ -92,6 +91,7 @@ S3_PREFIX = "data/"
 LOCAL_DIR = "./local_sc_judgments_data"
 PACKAGES_DIR = "./packages"
 DOWNLOAD_SCRIPT = "./download.py"
+IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def get_json_file(file_path) -> dict:
@@ -314,8 +314,11 @@ class S3ArchiveManager:
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix
         self.local_dir = Path(local_dir)
+        # session = boto3.Session(profile_name="dattam-supreme")
+        # self.s3 = session.client('s3', config=Config())
         self.s3 = boto3.client('s3')
         self.archives = {}
+        self.indexes = {}
 
     def __enter__(self):
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -326,19 +329,30 @@ class S3ArchiveManager:
 
     def get_archive(self, year, archive_type):
         archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+        index_name = f"sc-judgments-{year}-{archive_type}.index.json"
+
         if archive_name in self.archives:
             return self.archives[archive_name]
 
         local_path = self.local_dir / archive_name
         s3_key = f"{self.s3_prefix}{archive_name}"
+        index_s3_key = f"{self.s3_prefix}{index_name}"
 
         try:
             self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
             logger.info(f"Downloading existing archive: {s3_key}")
             self.s3.download_file(self.s3_bucket, s3_key, str(local_path))
+            
+            # Download index
+            index_local_path = self.local_dir / index_name
+            self.s3.download_file(self.s3_bucket, index_s3_key, str(index_local_path))
+            with open(index_local_path, 'r') as f:
+                self.indexes[archive_name] = json.load(f)
+
         except self.s3.exceptions.ClientError as e:
             if '404' in str(e):
                 logger.info(f"Archive not found on S3, creating new one: {s3_key}")
+                self.indexes[archive_name] = {"files": [], "file_count": 0, "created_at": datetime.now().isoformat()}
             else:
                 raise
 
@@ -349,14 +363,39 @@ class S3ArchiveManager:
     def add_to_archive(self, year, archive_type, filename, content):
         archive = self.get_archive(year, archive_type)
         archive.writestr(filename, content)
+        
+        archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+        self.indexes[archive_name]["files"].append(filename)
+
+    def file_exists(self, year, archive_type, filename):
+        archive_name = f"sc-judgments-{year}-{archive_type}.zip"
+        if archive_name not in self.indexes:
+            self.get_archive(year, archive_type) # This will load the index
+        
+        return filename in self.indexes[archive_name]["files"]
 
     def upload_archives(self):
         for archive_name, archive in self.archives.items():
             archive.close()
             local_path = self.local_dir / archive_name
             s3_key = f"{self.s3_prefix}{archive_name}"
+            
+            # Update and write index
+            index_name = archive_name.replace(".zip", ".index.json")
+            index_local_path = self.local_dir / index_name
+            index_data = self.indexes[archive_name]
+            index_data["file_count"] = len(index_data["files"])
+            index_data["updated_at"] = datetime.now(IST).isoformat()
+
+            with open(index_local_path, 'w') as f:
+                json.dump(index_data, f, indent=2)
+
             logger.info(f"Uploading archive: {s3_key}")
             self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
+            
+            index_s3_key = f"{self.s3_prefix}{index_name}"
+            logger.info(f"Uploading index: {index_s3_key}")
+            self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
 
 
 class Downloader:
@@ -428,7 +467,7 @@ class Downloader:
 
         # Check if metadata already exists
         metadata_filename = f"{pdf_info['path']}.json"
-        if not self.tar_checker.metadata_exists(year, metadata_filename):
+        if not self.archive_manager.file_exists(year, "metadata", metadata_filename):
             # Create metadata
             order_metadata = {
                 "raw_html": html,
@@ -444,15 +483,15 @@ class Downloader:
         pdfs_downloaded = 0
         for lang_code in language_codes:
             pdf_filename = self.get_pdf_filename(pdf_info["path"], lang_code)
+            archive_type = "english" if lang_code == "" else "regional"
 
             # Check if PDF already exists
-            if self.tar_checker.pdf_exists(year, pdf_filename, lang_code):
+            if self.archive_manager.file_exists(year, archive_type, pdf_filename):
                 continue  # Skip download
 
             try:
                 pdf_content = self.download_pdf(pdf_info, lang_code)
                 if pdf_content:
-                    archive_type = "english" if lang_code == "" else "regional"
                     self.archive_manager.add_to_archive(year, archive_type, pdf_filename, pdf_content)
                     pdfs_downloaded += 1
             except Exception as e:
