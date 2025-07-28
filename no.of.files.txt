@@ -1,0 +1,315 @@
+
+sc-judgments-1950-english: 41 files
+sc-judgments-1950-metadata: 41 files
+sc-judgments-1950-regional: 158 files
+sc-judgments-1951-english: 41 files
+sc-judgments-1951-metadata: 41 files
+sc-judgments-1951-regional: 167 files
+sc-judgments-1952-english: 69 files
+sc-judgments-1952-metadata: 69 files
+sc-judgments-1952-regional: 292 files
+sc-judgments-1953-english: 85 files
+sc-judgments-1953-metadata: 85 files
+sc-judgments-1953-regional: 332 files
+sc-judgments-1954-english: 80 files
+sc-judgments-1954-metadata: 80 files
+sc-judgments-1954-regional: 381 files
+sc-judgments-1955-english: 177 files
+sc-judgments-1955-metadata: 177 files
+sc-judgments-1955-regional: 732 files
+sc-judgments-1956-english: 61 files
+sc-judgments-1956-metadata: 61 files
+sc-judgments-1956-regional: 212 files
+sc-judgments-1957-english: 72 files
+sc-judgments-1957-metadata: 72 files
+sc-judgments-1957-regional: 246 files
+sc-judgments-1958-english: 85 files
+sc-judgments-1958-metadata: 85 files
+sc-judgments-1958-regional: 284 files
+sc-judgments-1959-english: 188 files
+sc-judgments-1959-metadata: 188 files
+sc-judgments-1959-regional: 462 files
+sc-judgments-1960-english: 211 files
+sc-judgments-1960-metadata: 211 files
+sc-judgments-1960-regional: 918 files
+sc-judgments-1961-english: 229 files
+sc-judgments-1961-metadata: 229 files
+sc-judgments-1961-regional: 1125 files
+sc-judgments-1962-english: 408 files
+sc-judgments-1962-metadata: 408 files
+sc-judgments-1962-regional: 1446 files
+sc-judgments-1963-english: 270 files
+sc-judgments-1963-metadata: 270 files
+sc-judgments-1963-regional: 853 files
+sc-judgments-1964-english: 448 files
+sc-judgments-1964-metadata: 448 files
+sc-judgments-1964-regional: 1685 files
+sc-judgments-1965-english: 245 files
+sc-judgments-1965-metadata: 245 files
+sc-judgments-1965-regional: 1097 files
+sc-judgments-1966-english: 325 files
+sc-judgments-1966-metadata: 325 files
+sc-judgments-1966-regional: 1228 files
+sc-judgments-1967-english: 293 files
+sc-judgments-1967-metadata: 293 files
+sc-judgments-1967-regional: 921 files
+sc-judgments-1968-english: 265 files
+sc-judgments-1968-metadata: 265 files
+sc-judgments-1968-regional: 678 files
+sc-judgments-1969-english: 316 files
+sc-judgments-1969-metadata: 316 files
+sc-judgments-1969-regional: 689 files
+sc-judgments-1970-english: 322 files
+sc-judgments-1970-metadata: 322 files
+sc-judgments-1970-regional: 693 files
+sc-judgments-1971-english: 371 files
+sc-judgments-1971-metadata: 371 files
+sc-judgments-1971-regional: 810 files
+sc-judgments-1972-english: 273 files
+sc-judgments-1972-metadata: 273 files
+sc-judgments-1972-regional: 627 files
+sc-judgments-1973-english: 304 files
+sc-judgments-1973-metadata: 304 files
+sc-judgments-1973-regional: 731 files
+sc-judgments-1974-english: 263 files
+sc-judgments-1974-metadata: 263 files
+sc-judgments-1974-regional: 587 files
+sc-judgments-1975-english: 319 files
+sc-judgments-1975-metadata: 319 files
+sc-judgments-1975-regional: 713 files
+sc-judgments-1976-english: 362 files
+sc-judgments-1976-metadata: 362 files
+sc-judgments-1976-regional: 813 files
+sc-judgments-1977-english: 329 files
+sc-judgments-1977-metadata: 329 files
+sc-judgments-1977-regional: 721 files
+sc-judgments-1978-english: 221 files
+sc-judgments-1978-metadata: 221 files
+sc-judgments-1978-regional: 482 files
+sc-judgments-1979-english: 262 files
+sc-judgments-1979-metadata: 262 files
+sc-judgments-1979-regional: 550 files
+sc-judgments-1980-english: 293 files
+sc-judgments-1980-metadata: 293 files
+sc-judgments-1980-regional: 744 files
+sc-judgments-1981-english: 226 files
+sc-judgments-1981-metadata: 226 files
+sc-judgments-1981-regional: 551 files
+sc-judgments-1982-english: 151 files
+sc-judgments-1982-metadata: 151 files
+sc-judgments-1982-regional: 313 files
+sc-judgments-1983-english: 174 files
+sc-judgments-1983-metadata: 174 files
+sc-judgments-1983-regional: 367 files
+sc-judgments-1984-english: 199 files
+sc-judgments-1984-metadata: 199 files
+sc-judgments-1984-regional: 404 files
+sc-judgments-1985-english: 381 files
+sc-judgments-1985-metadata: 381 files
+sc-judgments-1985-regional: 791 files
+sc-judgments-1986-english: 216 files
+sc-judgments-1986-metadata: 216 files
+sc-judgments-1986-regional: 456 files
+sc-judgments-1987-english: 308 files
+sc-judgments-1987-metadata: 308 files
+sc-judgments-1987-regional: 647 files
+sc-judgments-1988-english: 520 files
+sc-judgments-1988-metadata: 520 files
+sc-judgments-1988-regional: 1096 files
+sc-judgments-1989-english: 397 files
+sc-judgments-1989-metadata: 397 files
+sc-judgments-1989-regional: 872 files
+sc-judgments-1990-english: 401 files
+sc-judgments-1990-metadata: 401 files
+sc-judgments-1990-regional: 955 files
+sc-judgments-1991-english: 350 files
+sc-judgments-1991-metadata: 350 files
+sc-judgments-1991-regional: 1088 files
+sc-judgments-1992-english: 362 files
+sc-judgments-1992-metadata: 362 files
+sc-judgments-1992-regional: 891 files
+sc-judgments-1993-english: 397 files
+sc-judgments-1993-metadata: 397 files
+sc-judgments-1993-regional: 976 files
+sc-judgments-1994-english: 624 files
+sc-judgments-1994-metadata: 624 files
+sc-judgments-1994-regional: 2186 files
+sc-judgments-1995-english: 917 files
+sc-judgments-1995-metadata: 917 files
+sc-judgments-1995-regional: 3977 files
+sc-judgments-1996-english: 1536 files
+sc-judgments-1996-metadata: 1537 files
+sc-judgments-1996-regional: 7844 files
+sc-judgments-1997-english: 846 files
+sc-judgments-1997-metadata: 846 files
+sc-judgments-1997-regional: 4052 files
+sc-judgments-1998-english: 493 files
+sc-judgments-1998-metadata: 493 files
+sc-judgments-1998-regional: 1578 files
+sc-judgments-1999-english: 568 files
+sc-judgments-1999-metadata: 570 files
+sc-judgments-1999-regional: 2109 files
+sc-judgments-2000-english: 609 files
+sc-judgments-2000-metadata: 609 files
+sc-judgments-2000-regional: 1994 files
+sc-judgments-2001-english: 611 files
+sc-judgments-2001-metadata: 611 files
+sc-judgments-2001-regional: 1683 files
+sc-judgments-2002-english: 578 files
+sc-judgments-2002-metadata: 578 files
+sc-judgments-2002-regional: 1467 files
+sc-judgments-2003-english: 752 files
+sc-judgments-2003-metadata: 752 files
+sc-judgments-2003-regional: 1766 files
+sc-judgments-2004-english: 729 files
+sc-judgments-2004-metadata: 729 files
+sc-judgments-2004-regional: 1475 files
+sc-judgments-2005-english: 630 files
+sc-judgments-2005-metadata: 630 files
+sc-judgments-2005-regional: 1135 files
+sc-judgments-2006-english: 822 files
+sc-judgments-2006-metadata: 1027 files
+sc-judgments-2006-regional: 2005 files
+sc-judgments-2007-english: 1324 files
+sc-judgments-2007-metadata: 1324 files
+sc-judgments-2007-regional: 3037 files
+sc-judgments-2008-english: 1123 files
+sc-judgments-2008-metadata: 1123 files
+sc-judgments-2008-regional: 3811 files
+sc-judgments-2009-english: 2 files
+sc-judgments-2009-metadata: 1317 files
+sc-judgments-2009-regional: 2985 files
+sc-judgments-2010-english: 906 files
+sc-judgments-2010-metadata: 906 files
+sc-judgments-2010-regional: 2244 files
+sc-judgments-2011-english: 847 files
+sc-judgments-2011-metadata: 847 files
+sc-judgments-2011-regional: 1854 files
+sc-judgments-2012-english: 620 files
+sc-judgments-2012-metadata: 620 files
+sc-judgments-2012-regional: 1378 files
+sc-judgments-2013-english: 851 files
+sc-judgments-2013-metadata: 851 files
+sc-judgments-2013-regional: 1926 files
+sc-judgments-2014-english: 795 files
+sc-judgments-2014-metadata: 795 files
+sc-judgments-2014-regional: 1891 files
+sc-judgments-2015-english: 759 files
+sc-judgments-2015-metadata: 759 files
+sc-judgments-2015-regional: 1669 files
+sc-judgments-2016-english: 588 files
+sc-judgments-2016-metadata: 588 files
+sc-judgments-2016-regional: 1295 files
+sc-judgments-2017-english: 732 files
+sc-judgments-2017-metadata: 732 files
+sc-judgments-2017-regional: 1586 files
+sc-judgments-2018-english: 794 files
+sc-judgments-2018-metadata: 794 files
+sc-judgments-2018-regional: 1687 files
+sc-judgments-2019-english: 1050 files
+sc-judgments-2019-metadata: 1050 files
+sc-judgments-2019-regional: 2342 files
+sc-judgments-2020-english: 571 files
+sc-judgments-2020-metadata: 571 files
+sc-judgments-2020-regional: 1256 files
+sc-judgments-2021-english: 708 files
+sc-judgments-2021-metadata: 708 files
+sc-judgments-2021-regional: 1613 files
+sc-judgments-2022-english: 1017 files
+sc-judgments-2022-metadata: 1017 files
+sc-judgments-2022-regional: 2324 files
+sc-judgments-2023-english: 854 files
+sc-judgments-2023-metadata: 856 files
+sc-judgments-2023-regional: 2401 files
+sc-judgments-2024-english: 745 files
+sc-judgments-2024-metadata: 745 files
+sc-judgments-2024-regional: 925 files
+sc-judgments-2025-english: 190 files
+sc-judgments-2025-metadata: 190 files
+sc-judgments-2025-regional: 144 files
+
+--- SUMMARY ---
+Total judgment files across all archives: 172950
+
+Breakdown by type:
+English judgments: 35501
+Metadata files: 37026
+Regional judgments: 100423
+
+Breakdown by year:
+Year 1950: 240 files
+Year 1951: 249 files
+Year 1952: 430 files
+Year 1953: 502 files
+Year 1954: 541 files
+Year 1955: 1086 files
+Year 1956: 334 files
+Year 1957: 390 files
+Year 1958: 454 files
+Year 1959: 838 files
+Year 1960: 1340 files
+Year 1961: 1583 files
+Year 1962: 2262 files
+Year 1963: 1393 files
+Year 1964: 2581 files
+Year 1965: 1587 files
+Year 1966: 1878 files
+Year 1967: 1507 files
+Year 1968: 1208 files
+Year 1969: 1321 files
+Year 1970: 1337 files
+Year 1971: 1552 files
+Year 1972: 1173 files
+Year 1973: 1339 files
+Year 1974: 1113 files
+Year 1975: 1351 files
+Year 1976: 1537 files
+Year 1977: 1379 files
+Year 1978: 924 files
+Year 1979: 1074 files
+Year 1980: 1330 files
+Year 1981: 1003 files
+Year 1982: 615 files
+Year 1983: 715 files
+Year 1984: 802 files
+Year 1985: 1553 files
+Year 1986: 888 files
+Year 1987: 1263 files
+Year 1988: 2136 files
+Year 1989: 1666 files
+Year 1990: 1757 files
+Year 1991: 1788 files
+Year 1992: 1615 files
+Year 1993: 1770 files
+Year 1994: 3434 files
+Year 1995: 5811 files
+Year 1996: 10917 files
+Year 1997: 5744 files
+Year 1998: 2564 files
+Year 1999: 3247 files
+Year 2000: 3212 files
+Year 2001: 2905 files
+Year 2002: 2623 files
+Year 2003: 3270 files
+Year 2004: 2933 files
+Year 2005: 2395 files
+Year 2006: 3854 files
+Year 2007: 5685 files
+Year 2008: 6057 files
+Year 2009: 4304 files
+Year 2010: 4056 files
+Year 2011: 3548 files
+Year 2012: 2618 files
+Year 2013: 3628 files
+Year 2014: 3481 files
+Year 2015: 3187 files
+Year 2016: 2471 files
+Year 2017: 3050 files
+Year 2018: 3275 files
+Year 2019: 4442 files
+Year 2020: 2398 files
+Year 2021: 3029 files
+Year 2022: 4358 files
+Year 2023: 4111 files
+Year 2024: 2415 files
+Year 2025: 524 files
