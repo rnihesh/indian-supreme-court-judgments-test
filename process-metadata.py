@@ -196,8 +196,8 @@ class SupremeCourtMetadataProcessor:
             "author_judge": None
         }
         
-        # Try BeautifulSoup approach
-        judges_elem = soup.find('strong', text=re.compile(r'Coram\s*:'))
+        # Try BeautifulSoup approach - FIX: changed 'text' to 'string'
+        judges_elem = soup.find('strong', string=re.compile(r'Coram\s*:'))
         if judges_elem:
             judges_text = judges_elem.get_text().strip()
             if ':' in judges_text:
@@ -274,18 +274,18 @@ class SupremeCourtMetadataProcessor:
         # First try with BeautifulSoup for Supreme Court format
         details_elem = soup.find('strong', class_='caseDetailsTD')
         if details_elem:
-            # Extract decision date
-            date_span = details_elem.find('span', text=re.compile(r'Decision Date'))
+            # Extract decision date - FIX: changed 'text' to 'string'
+            date_span = details_elem.find('span', string=re.compile(r'Decision Date'))
             if date_span and date_span.find_next('font'):
                 result["decision_date"] = date_span.find_next('font').get_text().strip()
                 
-            # Extract disposal nature
-            disposal_span = details_elem.find('span', text=re.compile(r'Disposal Nature'))
+            # Extract disposal nature - FIX: changed 'text' to 'string'
+            disposal_span = details_elem.find('span', string=re.compile(r'Disposal Nature'))
             if disposal_span and disposal_span.find_next('font'):
                 result["disposal_nature"] = disposal_span.find_next('font').get_text().strip()
                 
-            # Extract case number (and use as court if needed)
-            case_span = details_elem.find('span', text=re.compile(r'Case No'))
+            # Extract case number - FIX: changed 'text' to 'string'
+            case_span = details_elem.find('span', string=re.compile(r'Case No'))
             if case_span and case_span.find_next('font'):
                 case_number = case_span.find_next('font').get_text().strip()
                 if "Supreme Court" in case_number:
@@ -624,15 +624,3 @@ if __name__ == "__main__":
     # Choose processing mode:
     # 1. Single process mode
     processor.process()
-    
-    # 2. Parallel processing mode (faster for large datasets)
-    # processor.process_parallel(max_workers=os.cpu_count())
-    
-    # 3. Process a single file (for testing)
-    # sample_json = """{
-    #   "raw_html": "<select class='form-select form-select-sm me-2' id='language24' name='language'><option value=''>English</option><option value='HIN'>हिन्दी - Hindi</option></select><button id='link_24'><strong>KIM WANSOO<span> versus </span>STATE OF UP</strong></button><strong>Coram : C.T. RAVIKUMAR*</strong>",
-    #   "path": "example",
-    #   "nc_display": "2025INSC8"
-    # }"""
-    # result = process_single_json_string(sample_json)
-    # print(result)
