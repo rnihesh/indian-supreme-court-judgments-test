@@ -16,13 +16,12 @@ Resources:
     Type: S3 Bucket
 DataAtWork:
   Tutorials:
-    - Title: Using the Indian Supreme Court Judgments Dataset on AWS
-      URL: https://github.com/vanga/indian-supreme-court-judgments/blob/main/opendata/tutorials/TUTORIAL.md
+    - Title: Using AWS Athena to query the metadata
+      URL: https://github.com/vanga/indian-supreme-court-judgments/blob/main/opendata/tutorials/ATHENA.md
       AuthorName: Nihesh Rachakonda
       AuthorURL: https://github.com/rnihesh
       Services:
-        - Amazon S3
-        - Amazon QuickSight
+        - Amazon Athena
     - Title: Dataset Overview and Usage Examples
       URL: https://github.com/vanga/indian-supreme-court-judgments/blob/main/opendata/tutorials/README.md
       AuthorName: Nihesh Rachakonda

@@ -1,4 +1,6 @@
-from pathlib import Path
+import boto3
+import botocore
+import io
 import json
 import lxml.html as LH
 from bs4 import BeautifulSoup
@@ -9,38 +11,34 @@ from tqdm import tqdm
 import concurrent.futures
 import re
 import os
-from typing import Dict, List, Any, Optional, Union, Tuple
+import zipfile
+import tempfile
+from typing import Dict, List, Any, Optional, Union
+from botocore import UNSIGNED
+from botocore.client import Config
 
-# Set to True to extract PDF metadata (requires exiftool)
-ADD_PDF_METADATA = False
-
-class SupremeCourtMetadataProcessor:
-    def __init__(self, src_dir: Union[str, Path], batch_size=5000, output_path="processed_metadata.parquet"):
+class SupremeCourtS3Processor:
+    def __init__(self, s3_bucket, s3_prefix="", batch_size=5000):
         """
-        Initialize the Supreme Court Metadata Processor
+        Initialize the Supreme Court Metadata Processor with S3 for both input and output
         
         Args:
-            src_dir: Source directory containing JSON files with raw_html
+            s3_bucket: S3 bucket name containing judgment data and for output
+            s3_prefix: Prefix (folder) within the bucket to look for data
             batch_size: Number of records to process before writing a batch
-            output_path: Output Parquet file path
         """
-        self.src = Path(src_dir)
+        self.s3_bucket = s3_bucket
+        self.s3_prefix = s3_prefix
         self.without_rh = 0
-        self.output_path = output_path
         self.record_count = 0
         self.batch_size = batch_size
         
-        # For parallel processing
-        self.output_dir = Path(os.path.dirname(output_path))
-        if not self.output_dir.exists():
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Buffer for batch processing
-        self.record_buffer = []
-        self.schema = None
-        self.writer = None
-
-        # Define fields to extract (Supreme Court specific, with removed fields as requested)
+        # Initialize S3 client
+        session = boto3.Session(profile_name="dattam-supreme")
+        self.s3 = session.client('s3', config=Config())
+        # self.s3 = boto3.client('s3')
+        
+        # Define fields to extract (Supreme Court specific)
         self.all_fields = [
             "title",
             "petitioner",
@@ -59,32 +57,210 @@ class SupremeCourtMetadataProcessor:
             "path",
             "nc_display",
             "scraped_at",
+            "year"  # Year field for partitioning
         ]
 
-        if ADD_PDF_METADATA:
-            self.all_fields.extend([
-                "pdf_exists",
-                "size",
-                "file_type",
-                "mime_type",
-                "pdf_version",
-                "pdf_linearized",
-                "pdf_pages",
-                "pdf_producer",
-                "pdf_language",
-            ])
+    def list_s3_objects(self, prefix=""):
+        """List objects in the S3 bucket with the given prefix."""
+        paginator = self.s3.get_paginator('list_objects_v2')
+        full_prefix = os.path.join(self.s3_prefix, prefix) if self.s3_prefix else prefix
+        
+        for page in paginator.paginate(Bucket=self.s3_bucket, Prefix=full_prefix):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    yield obj['Key']
 
-    def get_metadata_files(self):
-        """Find all JSON files in the source directory recursively."""
-        for file in self.src.glob("**/*.json"):
-            yield file
+    def read_s3_json(self, s3_key):
+        """Read JSON data directly from S3."""
+        try:
+            response = self.s3.get_object(Bucket=self.s3_bucket, Key=s3_key)
+            content = response['Body'].read().decode('utf-8')
+            return json.loads(content)
+        except Exception as e:
+            print(f"Error reading {s3_key}: {e}")
+            return None
 
-    def load_metadata(self, file: Union[Path, str]) -> dict:
-        """Load JSON metadata from a file."""
-        with open(file, 'r', encoding='utf-8') as f:
-            return json.load(f)
+    def process_s3_zip(self, s3_key, year):
+        """Process a ZIP file from S3 with minimal local storage."""
+        record_buffer = []
+        record_count = 0
+        
+        # We need to download the ZIP temporarily because zipfile needs random access
+        with tempfile.NamedTemporaryFile(suffix='.zip', delete=True) as tmp_zip:
+            try:
+                # Download ZIP to temp file
+                self.s3.download_file(self.s3_bucket, s3_key, tmp_zip.name)
+                
+                # Process ZIP contents in memory
+                with zipfile.ZipFile(tmp_zip.name, 'r') as zip_ref:
+                    for file_info in zip_ref.infolist():
+                        if file_info.filename.endswith('.json'):
+                            # Extract JSON data directly to memory
+                            with zip_ref.open(file_info) as json_file:
+                                content = json_file.read().decode('utf-8')
+                                metadata = json.loads(content)
+                                
+                                # Try to determine year from metadata if possible
+                                metadata_year = self._extract_year_from_metadata(metadata) or year
+                                processed = self.process_metadata(metadata, metadata_year)
+                                
+                                if processed:
+                                    record_buffer.append(processed)
+                                    
+                                    # Write batch if buffer is full
+                                    if len(record_buffer) >= self.batch_size:
+                                        self.write_records_to_s3(record_buffer, metadata_year)
+                                        record_count += len(record_buffer)
+                                        record_buffer = []
+                                        
+            except Exception as e:
+                print(f"Error processing ZIP file {s3_key}: {e}")
+                
+        # Write any remaining records
+        if record_buffer:
+            self.write_records_to_s3(record_buffer, year)
+            record_count += len(record_buffer)
+            
+        return record_count
 
-    def process_metadata(self, metadata: dict) -> Optional[dict]:
+    def process_s3_json(self, s3_key, year):
+        """Process a single JSON file directly from S3."""
+        try:
+            metadata = self.read_s3_json(s3_key)
+            if not metadata:
+                return 0
+                
+            # Try to determine year from metadata if possible
+            metadata_year = self._extract_year_from_metadata(metadata) or year
+            processed = self.process_metadata(metadata, metadata_year)
+            
+            if processed:
+                self.write_records_to_s3([processed], metadata_year)
+                return 1
+                
+        except Exception as e:
+            print(f"Error processing JSON file {s3_key}: {e}")
+            
+        return 0
+
+    def _extract_year_from_filename(self, filename):
+        """Extract the year from a filename like 'sc-judgments-2025-metadata.zip'."""
+        match = re.search(r'(\d{4})', filename)
+        if match:
+            return match.group(1)
+        return "unknown"
+
+    def get_all_s3_sources(self):
+        """Get all source files (ZIP archives and JSON files) from S3."""
+        # Check for ZIP archives first (they're more efficient to process)
+        zip_files = []
+        for s3_key in self.list_s3_objects():
+            if s3_key.endswith('-metadata.zip') and 'sc-judgments' in s3_key:
+                filename = os.path.basename(s3_key)
+                year = self._extract_year_from_filename(filename)
+                zip_files.append((s3_key, year))
+        
+        if zip_files:
+            return zip_files
+        
+        # If no ZIP files, look for individual JSON files
+        json_files = []
+        for s3_key in self.list_s3_objects():
+            if s3_key.endswith('.json'):
+                year = "unknown"
+                year_match = re.search(r'/(\d{4})/', s3_key)
+                if year_match:
+                    year = year_match.group(1)
+                json_files.append((s3_key, year))
+        
+        return json_files
+
+    def _extract_year_from_metadata(self, metadata):
+        """Try to extract year from metadata."""
+        # First check if there's citation_year in the metadata
+        if "citation_year" in metadata:
+            return metadata["citation_year"]
+            
+        # Next try to extract from nc_display
+        if "nc_display" in metadata:
+            match = re.search(r'(\d{4})INSC', metadata["nc_display"])
+            if match:
+                return match.group(1)
+                
+        # Try from raw_html
+        if "raw_html" in metadata:
+            match = re.search(r'(\d{4})INSC', metadata["raw_html"])
+            if match:
+                return match.group(1)
+                
+        return None
+
+    def write_records_to_s3(self, records, year):
+        """Write records directly to S3 as parquet."""
+        if not records:
+            return
+        
+        # Ensure all records have all fields
+        for record in records:
+            for field in self.all_fields:
+                if field not in record:
+                    record[field] = None
+
+        # Convert to DataFrame
+        df = pd.DataFrame(records)
+        
+        # Ensure all expected columns
+        for field in self.all_fields:
+            if field not in df.columns:
+                df[field] = None
+        
+        # Order columns
+        df = df[self.all_fields]
+        
+        # Convert string columns to string type
+        string_cols = [field for field in self.all_fields 
+                      if field not in ["pdf_exists", "pdf_linearized"]]
+        
+        for col in string_cols:
+            if col in df.columns:
+                try:
+                    df[col] = df[col].astype("string")
+                except:
+                    pass
+                
+        # Write to temp parquet file
+        with tempfile.NamedTemporaryFile(suffix='.parquet', delete=True) as tmp_file:
+            df.to_parquet(tmp_file.name, compression="snappy")
+            
+            # Upload to S3 directly in the requested format:
+            # s3_bucket/metadata/parquet/year=YYYY/metadata.parquet
+            s3_key = f"metadata/parquet/year={year}/metadata.parquet"
+            
+            # Check if a file already exists
+            try:
+                # If the file exists, we need to merge with it
+                self.s3.head_object(Bucket=self.s3_bucket, Key=s3_key)
+                
+                # Download existing file
+                with tempfile.NamedTemporaryFile(suffix='.parquet', delete=True) as existing_file:
+                    self.s3.download_file(self.s3_bucket, s3_key, existing_file.name)
+                    
+                    # Merge files
+                    existing_df = pd.read_parquet(existing_file.name)
+                    combined_df = pd.concat([existing_df, df], ignore_index=True)
+                    
+                    # Write merged data back to temp file
+                    combined_df.to_parquet(tmp_file.name, compression="snappy")
+            except:
+                # File doesn't exist, no need to merge
+                pass
+            
+            # Upload file to S3
+            self.s3.upload_file(tmp_file.name, self.s3_bucket, s3_key)
+        
+        return len(records)
+
+    def process_metadata(self, metadata: dict, year=None) -> Optional[dict]:
         """
         Process raw HTML metadata and extract structured information.
         
@@ -96,7 +272,7 @@ class SupremeCourtMetadataProcessor:
 
         html_s = metadata["raw_html"]
         
-        # Use both parsers for maximum flexibility
+        # Parse HTML
         html_element = LH.fromstring(html_s)
         soup = BeautifulSoup(html_s, 'html.parser')
 
@@ -106,25 +282,18 @@ class SupremeCourtMetadataProcessor:
             "path": metadata.get("path", ""),
             "nc_display": metadata.get("nc_display", ""),
             "scraped_at": metadata.get("scraped_at", ""),
+            "year": year if year else "unknown"
         }
 
-        # Extract available languages (as CSV string)
+        # Extract all metadata fields
         case_details["available_languages"] = self._extract_languages(soup)
-        
-        # Extract title, petitioner, respondent
         case_details.update(self._extract_case_title(soup, html_element))
         
-        # Extract case description
         description_elem = html_element.xpath("./text()")
         case_details["description"] = description_elem[0].strip() if description_elem else ""
         
-        # Extract judges information (with author judge identification)
         case_details.update(self._extract_judges(soup, html_element))
-        
-        # Extract citation information
         case_details.update(self._extract_citation(soup))
-        
-        # Extract case details from the caseDetailsTD element
         case_details.update(self._extract_case_details(soup, html_element))
         
         return case_details
@@ -196,7 +365,7 @@ class SupremeCourtMetadataProcessor:
             "author_judge": None
         }
         
-        # Try BeautifulSoup approach - FIX: changed 'text' to 'string'
+        # Try BeautifulSoup approach
         judges_elem = soup.find('strong', string=re.compile(r'Coram\s*:'))
         if judges_elem:
             judges_text = judges_elem.get_text().strip()
@@ -268,32 +437,21 @@ class SupremeCourtMetadataProcessor:
         result = {
             "decision_date": None,
             "disposal_nature": "",
-            "court": ""
+            "court": "Supreme Court of India"  # Default for Supreme Court data
         }
         
         # First try with BeautifulSoup for Supreme Court format
         details_elem = soup.find('strong', class_='caseDetailsTD')
         if details_elem:
-            # Extract decision date - FIX: changed 'text' to 'string'
+            # Extract decision date
             date_span = details_elem.find('span', string=re.compile(r'Decision Date'))
             if date_span and date_span.find_next('font'):
                 result["decision_date"] = date_span.find_next('font').get_text().strip()
                 
-            # Extract disposal nature - FIX: changed 'text' to 'string'
+            # Extract disposal nature
             disposal_span = details_elem.find('span', string=re.compile(r'Disposal Nature'))
             if disposal_span and disposal_span.find_next('font'):
                 result["disposal_nature"] = disposal_span.find_next('font').get_text().strip()
-                
-            # Extract case number - FIX: changed 'text' to 'string'
-            case_span = details_elem.find('span', string=re.compile(r'Case No'))
-            if case_span and case_span.find_next('font'):
-                case_number = case_span.find_next('font').get_text().strip()
-                if "Supreme Court" in case_number:
-                    result["court"] = "Supreme Court of India"
-                else:
-                    result["court"] = "Supreme Court of India"  # Default for Supreme Court data
-            else:
-                result["court"] = "Supreme Court of India"  # Default for Supreme Court data
             
             return result
         
@@ -314,313 +472,76 @@ class SupremeCourtMetadataProcessor:
                 )[0].strip()
             except (IndexError, KeyError):
                 pass
-
-            try:
-                result["court"] = (
-                    case_details_elements.xpath(
-                        './/span[contains(text(), "Court")]/text()'
-                    )[0]
-                    .split(":")[1]
-                    .strip()
-                )
-            except (IndexError, KeyError):
-                result["court"] = "Supreme Court of India"  # Default for Supreme Court data
                 
         except (IndexError, KeyError):
-            result["court"] = "Supreme Court of India"  # Default for Supreme Court data
+            pass
             
         return result
 
-    def _add_pdf_metadata(self, processed, pdf_path: Path):
-        """Add PDF metadata using exiftool if available."""
-        if not ADD_PDF_METADATA:
-            return
-            
-        if not pdf_path.exists():
-            processed["pdf_exists"] = False
-            return
-            
-        try:
-            import exiftool
-            with exiftool.ExifToolHelper() as et:
-                pdf_metadata = et.get_metadata(str(pdf_path))
-                if len(pdf_metadata) != 1:
-                    print(f"Error processing {pdf_path} for exif metadata, count: {len(pdf_metadata)}")
-                    return
-                    
-                pdf_metadata = pdf_metadata[0]
-                processed["pdf_exists"] = True
-                processed["size"] = pdf_metadata.get("File:FileSize", None)
-                processed["file_type"] = pdf_metadata.get("File:FileType", None)
-                processed["mime_type"] = pdf_metadata.get("File:MIMEType", None)
-                processed["pdf_version"] = pdf_metadata.get("PDF:PDFVersion", None)
-                processed["pdf_linearized"] = pdf_metadata.get("PDF:Linearized", None)
-                processed["pdf_pages"] = pdf_metadata.get("PDF:PageCount", None)
-                processed["pdf_producer"] = pdf_metadata.get("PDF:Producer", None)
-                processed["pdf_language"] = pdf_metadata.get("PDF:Language", None)
-        except ImportError:
-            print("exiftool module not installed. PDF metadata extraction disabled.")
-            processed["pdf_exists"] = True
-
-    def process(self):
-        """Process all JSON files in the source directory."""
-        try:
-            for file in tqdm(self.get_metadata_files()):
-                try:
-                    metadata = self.load_metadata(file)
-                    processed = self.process_metadata(metadata)
-                    
-                    if not processed:
-                        print(f"Skipping {file} because it has no raw_html")
-                        continue
-                        
-                    if ADD_PDF_METADATA:
-                        pdf_path = file.with_suffix(".pdf")
-                        self._add_pdf_metadata(processed, pdf_path)
-                        
-                    self.add_record(processed)
-                    
-                except Exception as e:
-                    print(f"Error processing {file}: {e}")
-        except Exception as e:
-            print(f"Error during processing: {e}")
-        finally:
-            if self.record_buffer:
-                self.write_batch()
-            if hasattr(self, "writer") and self.writer is not None:
-                self.writer.close()
-                print(f"Wrote {self.record_count} records to {self.output_path}")
-
-    def add_record(self, record):
-        """Add a record to the buffer and write if the buffer is full."""
-        if not record:
-            return
-            
-        self.record_buffer.append(record)
-
-        # If buffer reaches batch size, write the batch
-        if len(self.record_buffer) >= self.batch_size:
-            self.write_batch()
-
-    def write_batch(self):
-        """Write the current buffer as a batch to the parquet file."""
-        if not self.record_buffer:
-            return
-
-        # Ensure all records have all fields (with None for missing values)
-        for record in self.record_buffer:
-            for field in self.all_fields:
-                if field not in record:
-                    record[field] = None
-
-        # Convert buffer to pandas DataFrame
-        df = pd.DataFrame(self.record_buffer)
-
-        # Ensure DataFrame has all expected columns in the right order
-        for field in self.all_fields:
-            if field not in df.columns:
-                df[field] = None
-
-        # Reorder columns to match expected schema
-        df = df[self.all_fields]
-
-        # Define explicit dtypes to ensure consistency across batches
-        dtypes = {
-            "title": "string",
-            "petitioner": "string",
-            "respondent": "string",
-            "description": "string",
-            "judge": "string",
-            "author_judge": "string",
-            "citation": "string",
-            "case_id": "string",
-            "cnr": "string",
-            "decision_date": "string",        # Handle parsing later if needed
-            "disposal_nature": "string",
-            "court": "string",
-            "available_languages": "string",  # Now a CSV string
-            "path": "string",
-            "nc_display": "string",
-            "scraped_at": "string",
-            "pdf_exists": "boolean",
-            "size": "Int64",                  # Nullable integer
-            "file_type": "string",
-            "mime_type": "string",
-            "pdf_version": "float64",
-            "pdf_linearized": "boolean",
-            "pdf_pages": "Int64",
-            "pdf_producer": "string",
-            "pdf_language": "string",
-        }
-
-        # Apply the dtypes to columns that exist
-        for col, dtype in dtypes.items():
-            if col in df.columns:
-                try:
-                    df[col] = df[col].astype(dtype)
-                except:
-                    # If conversion fails, leave as is
-                    print(f"Warning: Could not convert {col} to {dtype}")
-
-        # Convert to PyArrow Table
-        table = pa.Table.from_pandas(df)
-
-        # Initialize writer if needed
-        if self.writer is None:
-            self.schema = table.schema
-            self.writer = pq.ParquetWriter(
-                self.output_path,
-                self.schema,
-                compression="snappy",
-            )
-
-        # Write the batch
-        self.writer.write_table(table)
-
-        # Update record count
-        self.record_count += len(self.record_buffer)
-
-        # Clear the buffer
-        self.record_buffer = []
+    def process_all(self, max_workers=None):
+        """Process all available sources from S3 using parallel processing."""
+        sources = list(self.get_all_s3_sources())
         
-    def process_court_dir(self, court_dir):
-        """Process a single court directory and return the output file path."""
-        court_name = court_dir.name
-        output_file = self.output_dir / f"{court_name}_metadata.parquet"
-
-        processor = SupremeCourtMetadataProcessor(court_dir, batch_size=self.batch_size)
-        processor.output_path = output_file
-        processor.process()
-
-        return output_file, processor.record_count, processor.without_rh
-
-    def process_parallel(self, max_workers=None):
-        """Process all court directories in parallel."""
-        court_dirs = [d for d in self.src.glob("court/cnrorders/*") if d.is_dir()]
+        if not sources:
+            print(f"No source files found in S3 bucket {self.s3_bucket}!")
+            return
+            
+        print(f"Found {len(sources)} source files to process from S3")
         
-        # If no court directories found, process the entire source directory
-        if not court_dirs:
-            court_dirs = [self.src]
-            print("No court subdirectories found. Processing main directory.")
-        else:
-            print(f"Found {len(court_dirs)} court directories to process")
-
+        # Use appropriate number of workers based on CPU count
+        if max_workers is None:
+            max_workers = min(32, os.cpu_count() + 4)
+        
         total_records = 0
-        total_without_rh = 0
-        output_files = []
-
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(self.process_court_dir, court_dir): court_dir.name
-                for court_dir in court_dirs
-            }
-
-            for future in tqdm(
-                concurrent.futures.as_completed(futures),
-                total=len(futures),
-                desc="Processing courts",
-            ):
-                court_name = futures[future]
+        processed_years = set()
+        
+        # Group sources by year for more efficient processing
+        sources_by_year = {}
+        for s3_key, year in sources:
+            if year not in sources_by_year:
+                sources_by_year[year] = []
+            sources_by_year[year].append(s3_key)
+        
+        # Process each year's data in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {}
+            
+            for year, year_sources in sources_by_year.items():
+                for s3_key in year_sources:
+                    # Choose processing method based on file type
+                    if s3_key.endswith('.zip'):
+                        future = executor.submit(self.process_s3_zip, s3_key, year)
+                    else:
+                        future = executor.submit(self.process_s3_json, s3_key, year)
+                    futures[future] = (year, s3_key)
+            
+            # Monitor progress
+            for future in tqdm(concurrent.futures.as_completed(futures), 
+                              total=len(futures), 
+                              desc="Processing years"):
+                year, s3_key = futures[future]
                 try:
-                    output_file, record_count, without_rh = future.result()
-                    output_files.append(output_file)
+                    record_count = future.result()
                     total_records += record_count
-                    total_without_rh += without_rh
-                    print(
-                        f"Completed {court_name}: {record_count} records, {without_rh} without raw_html"
-                    )
+                    processed_years.add(year)
+                    print(f"Completed {os.path.basename(s3_key)} for year {year}: {record_count} records")
                 except Exception as e:
-                    print(f"Error processing {court_name}: {e}")
-
-        if output_files:
-            self.combine_parquet_files(output_files)
-
-        print(f"Total records processed: {total_records}")
-        print(f"Total records without raw_html: {total_without_rh}")
-
-    def combine_parquet_files(self, file_paths):
-        """Combine multiple parquet files into a single file."""
-        if not file_paths:
-            print("No files to combine")
-            return
-
-        print(f"Combining {len(file_paths)} parquet files...")
-
-        # Read and combine all parquet files
-        dfs = []
-        for file_path in file_paths:
-            if isinstance(file_path, Path) and file_path.exists() and file_path.stat().st_size > 0:
-                try:
-                    df = pd.read_parquet(file_path)
-                    dfs.append(df)
-                except Exception as e:
-                    print(f"Error reading {file_path}: {e}")
-
-        if not dfs:
-            print("No valid parquet files to combine")
-            return
-
-        combined_df = pd.concat(dfs, ignore_index=True)
-
-        combined_df.to_parquet(self.output_path, compression="snappy")
-
-        print(
-            f"Combined {len(dfs)} files with {len(combined_df)} total records to {self.output_path}"
-        )
-
-
-# Utility functions
-def process_single_json_file(file_path, output_path=None):
-    """Process a single JSON file."""
-    if output_path is None:
-        output_path = Path(file_path).with_suffix(".parquet")
-    
-    processor = SupremeCourtMetadataProcessor(
-        Path(file_path).parent, 
-        batch_size=1, 
-        output_path=output_path
-    )
-    
-    with open(file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-    
-    processed = processor.process_metadata(data)
-    if processed:
-        processor.add_record(processed)
-        processor.write_batch()
-    
-    return processed
-
-
-def process_single_json_string(json_string, output_path=None):
-    """Process a JSON string."""
-    data = json.loads(json_string)
-    
-    temp_dir = Path("./temp")
-    temp_dir.mkdir(exist_ok=True)
-    
-    temp_file = temp_dir / "temp.json"
-    with open(temp_file, 'w', encoding='utf-8') as f:
-        json.dump(data, f)
-    
-    result = process_single_json_file(temp_file, output_path)
-    
-    # Clean up
-    if temp_file.exists():
-        temp_file.unlink()
-    
-    return result
+                    print(f"Error processing {s3_key} for year {year}: {e}")
+        
+        print(f"Processed {len(processed_years)} years with {total_records} total records")
+        print(f"Output files saved to S3 at {self.s3_bucket}/metadata/parquet/year=YYYY/metadata.parquet")
 
 
 if __name__ == "__main__":
-    # Example usage
-    src_dir = Path("./test_meta_par/")
-    processor = SupremeCourtMetadataProcessor(
-        src_dir=src_dir,
-        batch_size=1000, 
-        output_path="./processed_data/supreme_court_metadata.parquet"
+    # S3 bucket information
+    s3_bucket = "indian-supreme-court-judgments-test"  # Replace with your S3 bucket name
+    s3_prefix = ""  # Optional prefix (folder) in the bucket
+    
+    processor = SupremeCourtS3Processor(
+        s3_bucket=s3_bucket,
+        s3_prefix=s3_prefix,
+        batch_size=10000  # Increased batch size for efficiency
     )
     
-    # Choose processing mode:
-    # 1. Single process mode
-    processor.process()
+    # Process all available files using parallel processing
+    processor.process_all(max_workers=os.cpu_count())
