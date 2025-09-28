@@ -331,6 +331,7 @@ class S3ArchiveManager:
         self.s3 = boto3.client("s3")
         self.archives = {}
         self.indexes = {}
+        self.modified_archives = set()  # Track which archives have new content
         self.lock = threading.RLock()  # Reentrant lock for nested calls
 
     def __enter__(self):
@@ -395,6 +396,7 @@ class S3ArchiveManager:
             archive.writestr(filename, content)
 
             self.indexes[(year, archive_type)]["files"].append(filename)
+            self.modified_archives.add((year, archive_type))  # Mark as modified
 
     def file_exists(self, year, archive_type, filename):
         with self.lock:
@@ -404,6 +406,7 @@ class S3ArchiveManager:
             return filename in self.indexes[(year, archive_type)]["files"]
 
     def upload_archives(self):
+        uploaded_count = 0
         for (year, archive_type), archive in self.archives.items():
             archive.close()
 
@@ -411,6 +414,17 @@ class S3ArchiveManager:
             year_dir = self.local_dir / str(year)
             archive_name = f"{archive_type}.zip"
             local_path = year_dir / archive_name
+
+            # Only upload if this archive was modified
+            if (year, archive_type) not in self.modified_archives:
+                logger.info(f"Skipping upload for unchanged archive: {archive_name} (year {year})")
+                # Clean up local files for unchanged archives
+                if local_path.exists():
+                    local_path.unlink()
+                index_local_path = year_dir / f"{archive_type}.index.json"
+                if index_local_path.exists():
+                    index_local_path.unlink()
+                continue
 
             # Determine the correct S3 prefix based on archive type
             if archive_type == "metadata":
@@ -441,12 +455,32 @@ class S3ArchiveManager:
             with open(index_local_path, "w") as f:
                 json.dump(index_data, f, indent=2)
 
-            logger.info(f"Uploading archive: {s3_key}")
+            logger.info(f"Uploading modified archive: {s3_key}")
             self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
 
             index_s3_key = f"{s3_dir}{index_name}"
             logger.info(f"Uploading index: {index_s3_key}")
             self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
+            uploaded_count += 1
+
+        # Clean up empty year directories
+        self.cleanup_empty_year_directories()
+        
+        if uploaded_count > 0:
+            logger.info(f"Successfully uploaded {uploaded_count} modified archives")
+        else:
+            logger.info("No archives needed uploading - all data was already present")
+
+    def cleanup_empty_year_directories(self):
+        """Remove year directories that have no files after processing"""
+        for year_dir in self.local_dir.glob("*"):
+            if year_dir.is_dir() and year_dir.name.isdigit():
+                # Check if directory is empty or only contains empty subdirectories
+                has_files = any(f.is_file() for f in year_dir.rglob("*"))
+                if not has_files:
+                    logger.info(f"Cleaning up empty year directory: {year_dir}")
+                    import shutil
+                    shutil.rmtree(year_dir)
 
     def format_file_size(self, size_bytes):
         """Convert bytes to a human-readable format"""
@@ -1313,6 +1347,182 @@ def generate_parquet_from_metadata(s3_bucket, years_to_process=None):
     return total_records > 0
 
 
+def get_fill_progress_file():
+    """Get path to the fill progress tracking file"""
+    return Path("./sc_fill_progress.json")
+
+
+def save_fill_progress(start_date, end_date, current_date, completed_ranges):
+    """Save progress for gap filling process"""
+    progress_data = {
+        "start_date": start_date,
+        "end_date": end_date, 
+        "current_date": current_date,
+        "completed_ranges": completed_ranges,
+        "last_updated": datetime.now().isoformat()
+    }
+    
+    with open(get_fill_progress_file(), "w") as f:
+        json.dump(progress_data, f, indent=2)
+    
+    logger.info(f"Progress saved: currently at {current_date}")
+
+
+def load_fill_progress():
+    """Load existing progress for gap filling process"""
+    progress_file = get_fill_progress_file()
+    if not progress_file.exists():
+        return None
+        
+    try:
+        with open(progress_file, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning(f"Could not load progress file: {e}")
+        return None
+
+
+def clear_fill_progress():
+    """Clear progress file when process completes"""
+    progress_file = get_fill_progress_file()
+    if progress_file.exists():
+        progress_file.unlink()
+        logger.info("Progress file cleared - gap filling completed")
+
+
+def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, max_workers=5):
+    """
+    Fill gaps in S3 data by downloading everything from start to end date.
+    Uses existing upload functions and lets deduplication handle existing files.
+    Supports continuation from previous interrupted runs.
+    
+    Args:
+        s3_bucket: S3 bucket name
+        start_date: Start date for gap analysis (defaults to START_DATE = 1950-01-01) 
+        end_date: End date for gap analysis (defaults to current date)
+        day_step: Number of days per download chunk
+        max_workers: Number of parallel workers
+    """
+    logger.info("Starting comprehensive S3 gap-filling process...")
+    
+    # Check for existing progress
+    existing_progress = load_fill_progress()
+    
+    if existing_progress:
+        logger.info("Found existing progress from previous run:")
+        logger.info(f"  Original range: {existing_progress['start_date']} to {existing_progress['end_date']}")
+        logger.info(f"  Last processed: {existing_progress['current_date']}")
+        logger.info(f"  Completed ranges: {len(existing_progress['completed_ranges'])}")
+        
+        # Ask user if they want to continue or start fresh
+        if start_date or end_date:
+            # If user provided new dates, start fresh
+            logger.info("New date range provided, starting fresh...")
+            clear_fill_progress()
+            existing_progress = None
+        else:
+            # Continue from where we left off
+            start_date = existing_progress['start_date']
+            end_date = existing_progress['end_date']
+            logger.info("Continuing from previous progress...")
+    
+    # Set defaults if not provided and no existing progress
+    if not start_date:
+        start_date = START_DATE  # 1950-01-01
+    if not end_date:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    
+    logger.info(f"Processing date range: {start_date} to {end_date}")
+    
+    # Generate all date ranges for the entire period
+    all_date_ranges = list(get_date_ranges_to_process(start_date, end_date, day_step))
+    total_ranges = len(all_date_ranges)
+    
+    # Filter out already completed ranges if continuing
+    completed_ranges = set()
+    if existing_progress:
+        completed_ranges = set(tuple(r) for r in existing_progress.get('completed_ranges', []))
+        
+    remaining_ranges = [(from_date, to_date) for from_date, to_date in all_date_ranges 
+                       if (from_date, to_date) not in completed_ranges]
+    
+    logger.info(f"Total date ranges: {total_ranges}")
+    logger.info(f"Already completed: {len(completed_ranges)}")  
+    logger.info(f"Remaining to process: {len(remaining_ranges)}")
+    
+    if not remaining_ranges:
+        logger.info("All date ranges already completed!")
+        clear_fill_progress()
+        return
+    
+    logger.info("Existing files will be skipped automatically by the archive manager")
+    
+    # Process remaining ranges with progress tracking
+    with S3ArchiveManager(s3_bucket, S3_PREFIX, LOCAL_DIR) as archive_manager:
+        for i, (from_date, to_date) in enumerate(remaining_ranges, 1):
+            logger.info(f"Processing range {i}/{len(remaining_ranges)}: {from_date} to {to_date}")
+            
+            try:
+                # Process this specific date range
+                tasks = list(generate_tasks(from_date, to_date, 1))  # day_step=1 for individual date processing
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    for task_result in executor.map(lambda task: process_task(task, archive_manager), tasks):
+                        pass  # process_task doesn't return anything
+                
+                # Mark this range as completed
+                completed_ranges.add((from_date, to_date))
+                
+                # Save progress after each range
+                save_fill_progress(
+                    start_date, 
+                    end_date, 
+                    to_date,  # current_date is the end of this range
+                    list(completed_ranges)
+                )
+                
+                logger.info(f"Completed range {i}/{len(remaining_ranges)} ({from_date} to {to_date})")
+                
+            except Exception as e:
+                logger.error(f"Error processing range {from_date} to {to_date}: {e}")
+                logger.error("Progress saved. You can resume later by running the same command.")
+                raise
+        
+        logger.info("All date ranges completed. Archives will be uploaded automatically.")
+    
+    # After the 'with' block, all archives are automatically uploaded to S3
+    logger.info("S3 upload completed. Processing metadata to parquet...")
+    
+    # Process any new data to parquet using existing functions
+    downloaded_years = set()
+    for year_dir in LOCAL_DIR.glob("*"):
+        if year_dir.is_dir() and year_dir.name.isdigit():
+            metadata_zip = year_dir / "metadata.zip"
+            if metadata_zip.exists():
+                downloaded_years.add(year_dir.name)
+    
+    if downloaded_years:
+        logger.info(f"Processing metadata for years: {sorted(downloaded_years)}")
+        # Use existing parquet generation function
+        generate_parquet_from_metadata(s3_bucket, downloaded_years)
+    else:
+        logger.info("No new data found to process to parquet")
+    
+    # Clear progress file on successful completion
+    clear_fill_progress()
+    
+    logger.info("S3 comprehensive gap-filling process completed successfully!")
+
+
+def find_missing_date_ranges(s3_bucket, start_date=None, end_date=None):
+    """
+    DEPRECATED: This function is no longer used.
+    The new approach downloads everything and lets deduplication handle existing files.
+    """
+    logger.warning("find_missing_date_ranges is deprecated. Use sync_s3_fill_gaps directly.")
+    return []
+
+
 def generate_parquet_from_local_metadata(local_dir, s3_bucket):
     """
     Process metadata files from local directory only and append to S3 parquet files
@@ -1468,9 +1678,24 @@ if __name__ == "__main__":
         default=False,
         help="Sync data from S3 before running the downloader",
     )
+    parser.add_argument(
+        "--sync-s3-fill",
+        action="store_true",
+        default=False,
+        help="Fill gaps in S3 data by identifying and downloading missing date ranges",
+    )
     args = parser.parse_args()
 
-    if args.sync_s3:
+    if args.sync_s3_fill:
+        # Gap-filling mode: identify and fill missing date ranges
+        sync_s3_fill_gaps(
+            s3_bucket=S3_BUCKET,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            day_step=args.day_step,
+            max_workers=args.max_workers
+        )
+    elif args.sync_s3:
         with S3ArchiveManager(S3_BUCKET, S3_PREFIX, LOCAL_DIR) as archive_manager:
             latest_date = get_latest_date_from_metadata()
             logger.info(
