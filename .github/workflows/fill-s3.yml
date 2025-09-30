@@ -1,4 +1,4 @@
-name: Update S3 Data
+name: Fill S3 Data
 
 on:
   # schedule:
@@ -22,21 +22,58 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
-        run: python3 download.py --sync-s3-fill
+        run: python3 download.py --sync-s3-fill --timeout-hours 5.5
 
-      - name: Commit and push if changes were made
+      - name: Commit and push progress (always runs)
+        if: always()
         run: |-
           git config user.name "Automated"
           git config user.email "actions@users.noreply.github.com"
           git add -A
           timestamp=$(date -u)
-          git commit -m "Updated S3 data: ${timestamp}" || exit 0
-          git push
+
+          # Check if there are any changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            # Check if this was a timeout or completion
+            if [ -f "sc_fill_progress.json" ]; then
+              echo "Progress file found - this was a timeout, will continue next run"
+              git commit -m "S3 fill progress saved (timeout): ${timestamp}" || exit 0
+            else
+              echo "No progress file - process completed successfully"
+              git commit -m "S3 fill completed: ${timestamp}" || exit 0
+            fi
+            git push
+          fi
 
       - name: Create update record
+        if: always()
         run: |
-          echo "## S3 Update Status" >> $GITHUB_STEP_SUMMARY
-          echo "Updated at: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "## S3 Fill Status" >> $GITHUB_STEP_SUMMARY
+          echo "Run completed at: $(date)" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f "sc_fill_progress.json" ]; then
+            echo "📊 **Status**: Timed out - Progress saved for continuation" >> $GITHUB_STEP_SUMMARY
+            echo "🔄 **Next Action**: Workflow will automatically continue in next run" >> $GITHUB_STEP_SUMMARY
+            
+            # Extract progress info if possible
+            if command -v jq >/dev/null 2>&1; then
+              current_date=$(jq -r '.current_date // "unknown"' sc_fill_progress.json)
+              completed_ranges=$(jq -r '.completed_ranges | length' sc_fill_progress.json)
+              echo "📅 **Last Processed**: $current_date" >> $GITHUB_STEP_SUMMARY
+              echo "✅ **Completed Ranges**: $completed_ranges" >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "✅ **Status**: Successfully completed!" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 **Result**: All data gaps have been filled" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Log update timestamp
-        run: echo "::notice::S3 data updated at $(date)"
+        if: always()
+        run: |
+          if [ -f "sc_fill_progress.json" ]; then
+            echo "::notice::S3 fill timed out gracefully at $(date) - will continue next run"
+          else
+            echo "::notice::S3 fill completed successfully at $(date)"
+          fi

@@ -1390,7 +1390,7 @@ def clear_fill_progress():
         logger.info("Progress file cleared - gap filling completed")
 
 
-def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, max_workers=5):
+def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, max_workers=5, timeout_hours=5.5):
     """
     Fill gaps in S3 data by downloading everything from start to end date.
     Uses existing upload functions and lets deduplication handle existing files.
@@ -1402,8 +1402,13 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
         end_date: End date for gap analysis (defaults to current date)
         day_step: Number of days per download chunk
         max_workers: Number of parallel workers
+        timeout_hours: Maximum hours to run before graceful exit (default 5.5 hours)
     """
+    start_time = time.time()
+    timeout_seconds = timeout_hours * 3600
+    
     logger.info("Starting comprehensive S3 gap-filling process...")
+    logger.info(f"Timeout set to {timeout_hours} hours ({timeout_seconds/60:.0f} minutes)")
     
     # Check for existing progress
     existing_progress = load_fill_progress()
@@ -1457,10 +1462,22 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     
     logger.info("Existing files will be skipped automatically by the archive manager")
     
-    # Process remaining ranges with progress tracking
+    # Process remaining ranges with progress tracking and timeout
+    timeout_reached = False
     with S3ArchiveManager(s3_bucket, S3_PREFIX, LOCAL_DIR) as archive_manager:
         for i, (from_date, to_date) in enumerate(remaining_ranges, 1):
+            # Check timeout before starting each range
+            elapsed_time = time.time() - start_time
+            remaining_time = timeout_seconds - elapsed_time
+            
+            if elapsed_time >= timeout_seconds:
+                logger.warning(f"Timeout reached after {elapsed_time/3600:.2f} hours")
+                logger.warning("Gracefully stopping to avoid workflow timeout...")
+                timeout_reached = True
+                break
+            
             logger.info(f"Processing range {i}/{len(remaining_ranges)}: {from_date} to {to_date}")
+            logger.info(f"Elapsed: {elapsed_time/3600:.2f}h, Remaining: {remaining_time/3600:.2f}h")
             
             try:
                 # Process this specific date range
@@ -1468,7 +1485,14 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
                 
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     for task_result in executor.map(lambda task: process_task(task, archive_manager), tasks):
-                        pass  # process_task doesn't return anything
+                        # Check timeout during task processing
+                        if time.time() - start_time >= timeout_seconds:
+                            logger.warning("Timeout reached during task processing")
+                            timeout_reached = True
+                            break
+                
+                if timeout_reached:
+                    break
                 
                 # Mark this range as completed
                 completed_ranges.add((from_date, to_date))
@@ -1488,7 +1512,11 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
                 logger.error("Progress saved. You can resume later by running the same command.")
                 raise
         
-        logger.info("All date ranges completed. Archives will be uploaded automatically.")
+        if timeout_reached:
+            logger.info(f"Process stopped gracefully after {(time.time() - start_time)/3600:.2f} hours")
+            logger.info("Progress has been saved. Run the same command to continue from where you left off.")
+        else:
+            logger.info("All date ranges completed. Archives will be uploaded automatically.")
     
     # After the 'with' block, all archives are automatically uploaded to S3
     logger.info("S3 upload completed. Processing metadata to parquet...")
@@ -1508,10 +1536,12 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     else:
         logger.info("No new data found to process to parquet")
     
-    # Clear progress file on successful completion
-    clear_fill_progress()
-    
-    logger.info("S3 comprehensive gap-filling process completed successfully!")
+    # Only clear progress file if we completed everything (not timed out)
+    if not timeout_reached:
+        clear_fill_progress()
+        logger.info("S3 comprehensive gap-filling process completed successfully!")
+    else:
+        logger.info("Process paused due to timeout. Progress saved for next run.")
 
 
 def find_missing_date_ranges(s3_bucket, start_date=None, end_date=None):
@@ -1684,6 +1714,12 @@ if __name__ == "__main__":
         default=False,
         help="Fill gaps in S3 data by identifying and downloading missing date ranges",
     )
+    parser.add_argument(
+        "--timeout-hours",
+        type=float,
+        default=5.5,
+        help="Maximum hours to run before graceful exit (default: 5.5 hours)",
+    )
     args = parser.parse_args()
 
     if args.sync_s3_fill:
@@ -1693,7 +1729,8 @@ if __name__ == "__main__":
             start_date=args.start_date,
             end_date=args.end_date,
             day_step=args.day_step,
-            max_workers=args.max_workers
+            max_workers=args.max_workers,
+            timeout_hours=args.timeout_hours
         )
     elif args.sync_s3:
         with S3ArchiveManager(S3_BUCKET, S3_PREFIX, LOCAL_DIR) as archive_manager:
