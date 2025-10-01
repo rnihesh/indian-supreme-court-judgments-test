@@ -1,8 +1,8 @@
-name: Fill S3 Data
+name: Fill S3 Data (5-Year Chunks)
 
 on:
   # schedule:
-  #  - cron: "36 16 * * *" # Runs at 10 PM IST (UTC+5.5) daily
+  #  - cron: "0 */6 * * *" # Runs every 6 hours to process one chunk at a time
   workflow_dispatch: {}
 
 jobs:
@@ -36,13 +36,19 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            # Check if this was a timeout or completion
+            # Check if this was a chunk completion or interruption
             if [ -f "sc_fill_progress.json" ]; then
-              echo "Progress file found - this was a timeout, will continue next run"
-              git commit -m "S3 fill progress saved (timeout): ${timestamp}" || exit 0
+              # Extract chunk info from progress file
+              if command -v jq >/dev/null 2>&1; then
+                completed_chunks=$(jq -r '.completed_chunks | length' sc_fill_progress.json 2>/dev/null || echo "unknown")
+                last_chunk=$(jq -r '.last_chunk_end // "unknown"' sc_fill_progress.json 2>/dev/null || echo "unknown")
+                git commit -m "S3 fill progress: $completed_chunks chunks completed (last: $last_chunk) - ${timestamp}" || exit 0
+              else
+                git commit -m "S3 fill progress saved: ${timestamp}" || exit 0
+              fi
             else
-              echo "No progress file - process completed successfully"
-              git commit -m "S3 fill completed: ${timestamp}" || exit 0
+              echo "No progress file - all chunks completed!"
+              git commit -m "S3 fill completed - all chunks processed: ${timestamp}" || exit 0
             fi
             git push
           fi
@@ -50,30 +56,42 @@ jobs:
       - name: Create update record
         if: always()
         run: |
-          echo "## S3 Fill Status" >> $GITHUB_STEP_SUMMARY
+          echo "## S3 Fill Status (5-Year Chunks)" >> $GITHUB_STEP_SUMMARY
           echo "Run completed at: $(date)" >> $GITHUB_STEP_SUMMARY
 
           if [ -f "sc_fill_progress.json" ]; then
-            echo "📊 **Status**: Timed out - Progress saved for continuation" >> $GITHUB_STEP_SUMMARY
-            echo "🔄 **Next Action**: Workflow will automatically continue in next run" >> $GITHUB_STEP_SUMMARY
+            echo "� **Status**: Chunk completed - Progress saved" >> $GITHUB_STEP_SUMMARY
+            echo "🔄 **Next Action**: Run workflow again to process next chunk" >> $GITHUB_STEP_SUMMARY
             
-            # Extract progress info if possible
+            # Extract progress info
             if command -v jq >/dev/null 2>&1; then
-              current_date=$(jq -r '.current_date // "unknown"' sc_fill_progress.json)
-              completed_ranges=$(jq -r '.completed_ranges | length' sc_fill_progress.json)
-              echo "📅 **Last Processed**: $current_date" >> $GITHUB_STEP_SUMMARY
-              echo "✅ **Completed Ranges**: $completed_ranges" >> $GITHUB_STEP_SUMMARY
+              start_date=$(jq -r '.start_date // "unknown"' sc_fill_progress.json)
+              end_date=$(jq -r '.end_date // "unknown"' sc_fill_progress.json)
+              last_chunk_end=$(jq -r '.last_chunk_end // "unknown"' sc_fill_progress.json)
+              completed_chunks=$(jq -r '.completed_chunks | length' sc_fill_progress.json)
+              
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Progress Details:**" >> $GITHUB_STEP_SUMMARY
+              echo "- 📅 Overall Range: $start_date to $end_date" >> $GITHUB_STEP_SUMMARY
+              echo "- ✅ Completed Chunks: $completed_chunks" >> $GITHUB_STEP_SUMMARY
+              echo "- 🏁 Last Chunk End: $last_chunk_end" >> $GITHUB_STEP_SUMMARY
+              
+              # Show completed chunks
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo "**Completed Chunks:**" >> $GITHUB_STEP_SUMMARY
+              jq -r '.completed_chunks[] | "- " + .[0] + " to " + .[1]' sc_fill_progress.json >> $GITHUB_STEP_SUMMARY
             fi
           else
-            echo "✅ **Status**: Successfully completed!" >> $GITHUB_STEP_SUMMARY
-            echo "🎉 **Result**: All data gaps have been filled" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 **Status**: All chunks completed!" >> $GITHUB_STEP_SUMMARY
+            echo "✅ **Result**: All 5-year chunks from 1950 to present have been processed" >> $GITHUB_STEP_SUMMARY
+            echo "💾 **Data**: All data has been uploaded to S3" >> $GITHUB_STEP_SUMMARY
           fi
 
       - name: Log update timestamp
         if: always()
         run: |
           if [ -f "sc_fill_progress.json" ]; then
-            echo "::notice::S3 fill timed out gracefully at $(date) - will continue next run"
+            echo "::notice::Chunk completed at $(date) - Run workflow again to continue with next chunk"
           else
-            echo "::notice::S3 fill completed successfully at $(date)"
+            echo "::notice::All chunks completed successfully at $(date) - Process finished!"
           fi
