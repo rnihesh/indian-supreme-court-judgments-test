@@ -12,6 +12,7 @@ import urllib
 import uuid
 import warnings
 import zipfile
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Generator, Optional
@@ -22,6 +23,7 @@ import lxml.html as LH
 import pandas as pd
 import requests
 import urllib3
+from tqdm import tqdm
 from botocore import UNSIGNED
 from botocore.client import Config
 from bs4 import BeautifulSoup
@@ -77,6 +79,8 @@ PAGE_SIZE = 1000
 MATH_CAPTCHA = False
 NO_CAPTCHA_BATCH_SIZE = 25
 lock = threading.Lock()
+
+CHANGE_LOG_PREVIEW_LIMIT = 20
 
 captcha_failures_dir = Path("./captcha-failures")
 captcha_tmp_dir = Path("./captcha-tmp")
@@ -335,6 +339,8 @@ class S3ArchiveManager:
         self.lock = threading.RLock()  # Reentrant lock for nested calls
         self.immediate_upload = immediate_upload  # Upload immediately instead of on __exit__
         self.uploaded_archives = set()  # Track already uploaded archives to prevent duplicates
+        self.new_files_added = defaultdict(lambda: defaultdict(list))
+        self.year_upload_metadata = defaultdict(dict)
 
     def __enter__(self):
         self.local_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +413,10 @@ class S3ArchiveManager:
             self.indexes[(year, archive_type)]["files"].append(filename)
             self.modified_archives.add((year, archive_type))  # Mark as modified
 
+            # Track newly added files for summary purposes
+            if filename not in self.new_files_added[year][archive_type]:
+                self.new_files_added[year][archive_type].append(filename)
+
     def file_exists(self, year, archive_type, filename):
         with self.lock:
             if (year, archive_type) not in self.indexes:
@@ -454,6 +464,8 @@ class S3ArchiveManager:
                         zip_size_bytes = local_path.stat().st_size
                         index_data["zip_size"] = zip_size_bytes
                         index_data["zip_size_human"] = self.format_file_size(zip_size_bytes)
+                    else:
+                        zip_size_bytes = None
                     
                     with open(index_local_path, "w") as f:
                         json.dump(index_data, f, indent=2)
@@ -468,6 +480,21 @@ class S3ArchiveManager:
                     # Mark as uploaded
                     self.uploaded_archives.add((year, archive_type))
                     uploaded_count += 1
+
+                    # Persist metadata about this upload for later summaries
+                    self.year_upload_metadata[year][archive_type] = {
+                        "zip_size_bytes": zip_size_bytes,
+                        "zip_size_human": index_data.get("zip_size_human"),
+                        "files_added": list(self.new_files_added.get(year, {}).get(archive_type, [])),
+                    }
+
+                    added_files = self.new_files_added.get(year, {}).get(archive_type, [])
+                    if added_files:
+                        logger.info(
+                            f"  • {archive_name}: added {len(added_files)} file(s)"
+                        )
+                    else:
+                        logger.info(f"  • {archive_name}: no new files to upload")
                     
                     # Clean up local files after upload
                     local_path.unlink()
@@ -482,6 +509,33 @@ class S3ArchiveManager:
                 logger.info(f"✅ Uploaded {uploaded_count} archives for year {year}")
             
             return uploaded_count
+
+    def get_yearly_changes(self, year):
+        """Return a summary of new files added for a particular year."""
+        with self.lock:
+            return {
+                archive_type: list(files)
+                for archive_type, files in self.new_files_added.get(year, {}).items()
+                if files
+            }
+
+    def get_all_changes(self):
+        """Return a nested dict of {year: {archive_type: [files...]}} for the current session."""
+        with self.lock:
+            summary = {}
+            for year, archive_map in self.new_files_added.items():
+                filtered = {
+                    archive_type: list(files)
+                    for archive_type, files in archive_map.items()
+                    if files
+                }
+                if filtered:
+                    summary[str(year)] = filtered
+            return summary
+
+    def get_upload_metadata(self):
+        with self.lock:
+            return json.loads(json.dumps(self.year_upload_metadata, default=str))
 
     def upload_archives(self):
         uploaded_count = 0
@@ -1505,10 +1559,8 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
         overall_start = existing_progress['start_date']
         overall_end = existing_progress['end_date']
         completed_chunks = [tuple(c) for c in existing_progress.get('completed_chunks', [])]
-        last_chunk_end = existing_progress.get('last_chunk_end')
     else:
         completed_chunks = []
-        last_chunk_end = None
     
     logger.info(f"📅 Overall processing range: {overall_start} to {overall_end}")
     
@@ -1558,46 +1610,67 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     # Track years processed in this chunk
     years_in_chunk = set()
     current_year = None
+    chunk_changes = {}
+    upload_metadata = {}
     
     # Use immediate upload mode
     with S3ArchiveManager(s3_bucket, S3_PREFIX, LOCAL_DIR, immediate_upload=True) as archive_manager:
         try:
             # Generate date ranges for this chunk only
             chunk_date_ranges = list(get_date_ranges_to_process(chunk_start, chunk_end, day_step))
-            
-            logger.info(f"📝 Processing {len(chunk_date_ranges)} date ranges in this chunk")
-            
-            for i, (from_date, to_date) in enumerate(chunk_date_ranges, 1):
-                # Check timeout
-                elapsed_time = time.time() - start_time
-                if elapsed_time >= timeout_seconds:
-                    logger.warning(f"⏰ Timeout reached after {elapsed_time/3600:.2f} hours")
-                    logger.warning("⚠️  Did not complete the full chunk - will retry from chunk start next run")
-                    return  # Exit without marking chunk as complete
-                
-                logger.info("")
-                logger.info(f"  Range {i}/{len(chunk_date_ranges)}: {from_date} to {to_date}")
-                
-                # Process this date range
-                tasks = list(generate_tasks(from_date, to_date, 1))
-                
-                for task in tasks:
-                    if time.time() - start_time >= timeout_seconds:
-                        logger.warning("⏰ Timeout reached during task processing")
+            total_ranges = len(chunk_date_ranges)
+            logger.info(f"📝 Processing {total_ranges} date ranges in this chunk")
+
+            date_range_bar = tqdm(
+                chunk_date_ranges,
+                desc=f"📆 Ranges {chunk_start}→{chunk_end}",
+                unit="range",
+                leave=False,
+            )
+
+            try:
+                for i, (from_date, to_date) in enumerate(date_range_bar, 1):
+                    # Check timeout
+                    elapsed_time = time.time() - start_time
+                    if elapsed_time >= timeout_seconds:
+                        logger.warning(f"⏰ Timeout reached after {elapsed_time/3600:.2f} hours")
+                        logger.warning("⚠️  Did not complete the full chunk - will retry from chunk start next run")
                         return  # Exit without marking chunk as complete
                     
-                    process_task(task, archive_manager)
+                    logger.info("")
+                    logger.info(f"  Range {i}/{total_ranges}: {from_date} to {to_date}")
                     
-                    # Track year and upload when year changes
-                    task_year = datetime.strptime(task.from_date, "%Y-%m-%d").year
-                    if current_year is not None and task_year != current_year:
-                        # Year changed - upload previous year's data
-                        logger.info(f"📤 Year changed from {current_year} to {task_year}, uploading {current_year} data...")
-                        archive_manager.upload_year_archives(current_year)
-                        years_in_chunk.add(current_year)
-                    
-                    current_year = task_year
-            
+                    # Process this date range
+                    tasks = list(generate_tasks(from_date, to_date, 1))
+                    tasks_bar = tqdm(
+                        tasks,
+                        desc=f"  ↳ {from_date}→{to_date}",
+                        unit="day",
+                        leave=False,
+                    )
+
+                    try:
+                        for task in tasks_bar:
+                            if time.time() - start_time >= timeout_seconds:
+                                logger.warning("⏰ Timeout reached during task processing")
+                                return  # Exit without marking chunk as complete
+                            
+                            process_task(task, archive_manager)
+                            
+                            # Track year and upload when year changes
+                            task_year = datetime.strptime(task.from_date, "%Y-%m-%d").year
+                            if current_year is not None and task_year != current_year:
+                                # Year changed - upload previous year's data
+                                logger.info(f"📤 Year changed from {current_year} to {task_year}, uploading {current_year} data...")
+                                archive_manager.upload_year_archives(current_year)
+                                years_in_chunk.add(current_year)
+                            
+                            current_year = task_year
+                    finally:
+                        tasks_bar.close()
+            finally:
+                date_range_bar.close()
+
             # Upload final year's data
             if current_year is not None:
                 logger.info(f"📤 Uploading final year {current_year} data...")
@@ -1635,7 +1708,41 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
             logger.error("⚠️  Chunk was NOT completed - will retry from chunk start next run")
             traceback.print_exc()
             return
-    
+            
+        chunk_changes = archive_manager.get_all_changes()
+        upload_metadata = archive_manager.get_upload_metadata()
+
+    # Summarize chunk changes outside the context manager once uploads are done
+    if chunk_changes:
+        logger.info("")
+        logger.info("🆕 Change summary for this chunk:")
+        for year in sorted(chunk_changes.keys(), key=int):
+            logger.info(f"  📁 Year {year}:")
+            for archive_type, files in chunk_changes[year].items():
+                logger.info(f"    • {archive_type}: {len(files)} file(s)")
+                preview = files[:CHANGE_LOG_PREVIEW_LIMIT]
+                for filename in preview:
+                    logger.info(f"       - {filename}")
+                if len(files) > CHANGE_LOG_PREVIEW_LIMIT:
+                    logger.info(
+                        f"       … plus {len(files) - CHANGE_LOG_PREVIEW_LIMIT} more (see chunk_changes_summary.json)"
+                    )
+    else:
+        logger.info("ℹ️  No new files were added in this chunk.")
+
+    summary_payload = {
+        "chunk": {"start": chunk_start, "end": chunk_end},
+        "generated_at": datetime.now().isoformat(),
+        "years": {
+            str(year): meta for year, meta in upload_metadata.items()
+        },
+        "files": chunk_changes,
+    }
+    summary_path = Path("./chunk_changes_summary.json")
+    with open(summary_path, "w") as summary_file:
+        json.dump(summary_payload, summary_file, indent=2)
+    logger.info(f"📝 Detailed change summary written to {summary_path.resolve()}")
+
     # Process metadata to parquet for the years in this chunk
     if years_in_chunk:
         logger.info("")

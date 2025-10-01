@@ -91,6 +91,7 @@ After each run:
    - Shows completed chunks
    - Shows which chunk ranges are done
    - Shows next action needed
+   - Displays the `tqdm` progress bars captured in the logs for quick visual feedback
 
 2. **Check commits** - Each run commits progress
 
@@ -102,6 +103,10 @@ After each run:
    aws s3 ls s3://indian-supreme-court-judgments-test/metadata/zip/ --recursive
    aws s3 ls s3://indian-supreme-court-judgments-test/data/zip/ --recursive
    ```
+
+4. **Review the change summary**
+   - Inspect the console log near the end for the "🆕 Change summary" section
+   - Open `chunk_changes_summary.json` to see every file added in the last chunk (per year and archive type)
 
 ### Step 5: How the Process Works
 

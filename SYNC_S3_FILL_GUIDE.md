@@ -30,6 +30,19 @@ The `--sync-s3-fill` mode has been redesigned to process data in **5-year chunks
 - If a chunk isn't completed, it restarts from the beginning of that chunk
 - Once a chunk completes, progress moves to the next 5-year period
 
+### 5. **Live Progress Indicators**
+
+- Each chunk displays a `tqdm` progress bar for the list of date ranges being processed
+- Nested progress bars show per-day downloads within the active range
+- Works alongside logging, so you can see both the bar and detailed status lines
+
+### 6. **Chunk Change Summary**
+
+- After every chunk finishes, a change report is printed in the console
+- The summary highlights each year and archive type with the number of new files added
+- A preview (up to 20 file names per archive) is logged
+- Full details are saved to `chunk_changes_summary.json` for later review or commits
+
 ## 🚀 Usage
 
 ### Basic Command
