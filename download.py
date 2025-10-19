@@ -337,8 +337,12 @@ class S3ArchiveManager:
         self.indexes = {}
         self.modified_archives = set()  # Track which archives have new content
         self.lock = threading.RLock()  # Reentrant lock for nested calls
-        self.immediate_upload = immediate_upload  # Upload immediately instead of on __exit__
-        self.uploaded_archives = set()  # Track already uploaded archives to prevent duplicates
+        self.immediate_upload = (
+            immediate_upload  # Upload immediately instead of on __exit__
+        )
+        self.uploaded_archives = (
+            set()
+        )  # Track already uploaded archives to prevent duplicates
         self.new_files_added = defaultdict(lambda: defaultdict(list))
         self.year_upload_metadata = defaultdict(dict)
 
@@ -433,50 +437,54 @@ class S3ArchiveManager:
                     # Skip if already uploaded
                     if (year, archive_type) in self.uploaded_archives:
                         continue
-                    
+
                     # Only upload if modified
                     if (year, archive_type) not in self.modified_archives:
                         continue
-                    
+
                     archive = self.archives[(year, archive_type)]
                     archive.close()
-                    
+
                     year_dir = self.local_dir / str(year)
                     archive_name = f"{archive_type}.zip"
                     local_path = year_dir / archive_name
-                    
+
                     # Determine S3 path
                     if archive_type == "metadata":
                         s3_dir = f"metadata/zip/year={year}/"
                     else:
                         s3_dir = f"data/zip/year={year}/"
-                    
+
                     s3_key = f"{s3_dir}{archive_name}"
-                    
+
                     # Update index
                     index_name = f"{archive_type}.index.json"
                     index_local_path = year_dir / index_name
                     index_data = self.indexes[(year, archive_type)]
                     index_data["file_count"] = len(index_data["files"])
                     index_data["updated_at"] = datetime.now(IST).isoformat()
-                    
+
                     if local_path.exists():
                         zip_size_bytes = local_path.stat().st_size
                         index_data["zip_size"] = zip_size_bytes
-                        index_data["zip_size_human"] = self.format_file_size(zip_size_bytes)
+                        index_data["zip_size_human"] = self.format_file_size(
+                            zip_size_bytes
+                        )
                     else:
                         zip_size_bytes = None
-                    
+
                     with open(index_local_path, "w") as f:
                         json.dump(index_data, f, indent=2)
-                    
+
                     # Upload to S3
                     logger.info(f"Uploading {archive_name} for year {year}...")
                     self.s3.upload_file(str(local_path), self.s3_bucket, s3_key)
-                    
+
                     index_s3_key = f"{s3_dir}{index_name}"
-                    self.s3.upload_file(str(index_local_path), self.s3_bucket, index_s3_key)
-                    
+                    self.s3.upload_file(
+                        str(index_local_path), self.s3_bucket, index_s3_key
+                    )
+
                     # Mark as uploaded
                     self.uploaded_archives.add((year, archive_type))
                     uploaded_count += 1
@@ -485,29 +493,33 @@ class S3ArchiveManager:
                     self.year_upload_metadata[year][archive_type] = {
                         "zip_size_bytes": zip_size_bytes,
                         "zip_size_human": index_data.get("zip_size_human"),
-                        "files_added": list(self.new_files_added.get(year, {}).get(archive_type, [])),
+                        "files_added": list(
+                            self.new_files_added.get(year, {}).get(archive_type, [])
+                        ),
                     }
 
-                    added_files = self.new_files_added.get(year, {}).get(archive_type, [])
+                    added_files = self.new_files_added.get(year, {}).get(
+                        archive_type, []
+                    )
                     if added_files:
                         logger.info(
                             f"  • {archive_name}: added {len(added_files)} file(s)"
                         )
                     else:
                         logger.info(f"  • {archive_name}: no new files to upload")
-                    
+
                     # Clean up local files after upload
                     local_path.unlink()
                     index_local_path.unlink()
-                    
+
                     # Reopen archive for continued use
                     self.archives[(year, archive_type)] = zipfile.ZipFile(
                         local_path, "a", zipfile.ZIP_DEFLATED
                     )
-            
+
             if uploaded_count > 0:
                 logger.info(f"✅ Uploaded {uploaded_count} archives for year {year}")
-            
+
             return uploaded_count
 
     def get_yearly_changes(self, year):
@@ -549,7 +561,9 @@ class S3ArchiveManager:
 
             # Only upload if this archive was modified
             if (year, archive_type) not in self.modified_archives:
-                logger.info(f"Skipping upload for unchanged archive: {archive_name} (year {year})")
+                logger.info(
+                    f"Skipping upload for unchanged archive: {archive_name} (year {year})"
+                )
                 # Clean up local files for unchanged archives
                 if local_path.exists():
                     local_path.unlink()
@@ -597,7 +611,7 @@ class S3ArchiveManager:
 
         # Clean up empty year directories
         self.cleanup_empty_year_directories()
-        
+
         if uploaded_count > 0:
             logger.info(f"Successfully uploaded {uploaded_count} modified archives")
         else:
@@ -612,6 +626,7 @@ class S3ArchiveManager:
                 if not has_files:
                     logger.info(f"Cleaning up empty year directory: {year_dir}")
                     import shutil
+
                     shutil.rmtree(year_dir)
 
     def format_file_size(self, size_bytes):
@@ -681,9 +696,9 @@ class Downloader:
 
         # First check for direct PDF button (single language) with role="link"
         button = soup.find("button", {"role": "link"})
-        assert button and "onclick" in button.attrs, (
-            f"No PDF button found, task: {self.task}"
-        )
+        assert (
+            button and "onclick" in button.attrs
+        ), f"No PDF button found, task: {self.task}"
         pdf_info = self.extract_pdf_fragment_from_button(button["onclick"])
         assert pdf_info, f"No PDF info found, task: {self.task}"
 
@@ -723,7 +738,12 @@ class Downloader:
         pdfs_downloaded = 0
         for lang_code in language_codes:
             pdf_filename = self.get_pdf_filename(pdf_info["path"], lang_code)
-            archive_type = "english" if lang_code == "" else "regional"
+            # Classify as English if lang_code is empty string or "EN" (case-insensitive)
+            archive_type = (
+                "english"
+                if (lang_code == "" or lang_code.upper() == "EN")
+                else "regional"
+            )
 
             # Check if PDF already exists
             if self.archive_manager.file_exists(year, archive_type, pdf_filename):
@@ -1146,7 +1166,10 @@ class Downloader:
 
     def get_pdf_filename(self, path, lang_code):
         """Get standardized PDF filename"""
-        if lang_code:
+        # Normalize English language code to uppercase
+        if lang_code and lang_code.upper() == "EN":
+            return f"{path}_EN.pdf"
+        elif lang_code:
             return f"{path}_{lang_code}.pdf"
         else:
             return f"{path}_EN.pdf"
@@ -1424,7 +1447,7 @@ def get_latest_date_from_metadata(force_check_files=False):
     # Create a separate directory for index files outside of LOCAL_DIR
     index_cache_dir = Path("./index_cache")
     index_cache_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Updated path for metadata index - store outside LOCAL_DIR
     index_path = index_cache_dir / f"{current_year}_metadata.index.json"
     index_key = f"metadata/zip/year={current_year}/metadata.index.json"
@@ -1488,15 +1511,15 @@ def save_fill_progress(start_date, end_date, current_date, completed_ranges):
     """Save progress for gap filling process"""
     progress_data = {
         "start_date": start_date,
-        "end_date": end_date, 
+        "end_date": end_date,
         "current_date": current_date,
         "completed_ranges": completed_ranges,
-        "last_updated": datetime.now().isoformat()
+        "last_updated": datetime.now().isoformat(),
     }
-    
+
     with open(get_fill_progress_file(), "w") as f:
         json.dump(progress_data, f, indent=2)
-    
+
     logger.info(f"Progress saved: currently at {current_date}")
 
 
@@ -1505,7 +1528,7 @@ def load_fill_progress():
     progress_file = get_fill_progress_file()
     if not progress_file.exists():
         return None
-        
+
     try:
         with open(progress_file, "r") as f:
             return json.load(f)
@@ -1522,15 +1545,22 @@ def clear_fill_progress():
         logger.info("Progress file cleared - gap filling completed")
 
 
-def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, max_workers=5, timeout_hours=5.5):
+def sync_s3_fill_gaps(
+    s3_bucket,
+    start_date=None,
+    end_date=None,
+    day_step=30,
+    max_workers=5,
+    timeout_hours=5.5,
+):
     """
     Fill gaps in S3 data by processing ONE 5-year chunk per run.
     Uses immediate upload after each year to prevent data loss.
     Run this repeatedly - it will automatically pick up the next 5-year chunk each time.
-    
+
     Args:
         s3_bucket: S3 bucket name
-        start_date: Start date for gap analysis (defaults to START_DATE = 1950-01-01) 
+        start_date: Start date for gap analysis (defaults to START_DATE = 1950-01-01)
         end_date: End date for gap analysis (defaults to current date)
         day_step: Number of days per download chunk
         max_workers: Number of parallel workers
@@ -1538,86 +1568,101 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     """
     start_time = time.time()
     timeout_seconds = timeout_hours * 3600
-    
+
     logger.info("🚀 Starting 5-year chunk S3 gap-filling process...")
-    logger.info(f"⏰ Timeout set to {timeout_hours} hours ({timeout_seconds/60:.0f} minutes)")
-    
+    logger.info(
+        f"⏰ Timeout set to {timeout_hours} hours ({timeout_seconds/60:.0f} minutes)"
+    )
+
     # Check for existing progress
     existing_progress = load_fill_progress()
-    
+
     # Determine the overall start and end dates
     overall_start = start_date or START_DATE
     overall_end = end_date or datetime.now().strftime("%Y-%m-%d")
-    
+
     if existing_progress:
         logger.info("📋 Found existing progress from previous run:")
-        logger.info(f"  Overall range: {existing_progress['start_date']} to {existing_progress['end_date']}")
-        logger.info(f"  Last completed chunk: {existing_progress.get('last_chunk_end', 'None')}")
-        logger.info(f"  Completed chunks: {len(existing_progress.get('completed_chunks', []))}")
-        
+        logger.info(
+            f"  Overall range: {existing_progress['start_date']} to {existing_progress['end_date']}"
+        )
+        logger.info(
+            f"  Last completed chunk: {existing_progress.get('last_chunk_end', 'None')}"
+        )
+        logger.info(
+            f"  Completed chunks: {len(existing_progress.get('completed_chunks', []))}"
+        )
+
         # Use existing overall range
-        overall_start = existing_progress['start_date']
-        overall_end = existing_progress['end_date']
-        completed_chunks = [tuple(c) for c in existing_progress.get('completed_chunks', [])]
+        overall_start = existing_progress["start_date"]
+        overall_end = existing_progress["end_date"]
+        completed_chunks = [
+            tuple(c) for c in existing_progress.get("completed_chunks", [])
+        ]
     else:
         completed_chunks = []
-    
+
     logger.info(f"📅 Overall processing range: {overall_start} to {overall_end}")
-    
+
     # Generate 5-year chunks
     start_dt = datetime.strptime(overall_start, "%Y-%m-%d")
     end_dt = datetime.strptime(overall_end, "%Y-%m-%d")
-    
+
     all_five_year_chunks = []
     current_chunk_start = start_dt
-    
+
     while current_chunk_start <= end_dt:
         # Calculate 5-year chunk end
         chunk_end = min(
-            datetime(current_chunk_start.year + 5, 1, 1) - timedelta(days=1),
-            end_dt
+            datetime(current_chunk_start.year + 5, 1, 1) - timedelta(days=1), end_dt
         )
-        
+
         chunk_tuple = (
             current_chunk_start.strftime("%Y-%m-%d"),
-            chunk_end.strftime("%Y-%m-%d")
+            chunk_end.strftime("%Y-%m-%d"),
         )
         all_five_year_chunks.append(chunk_tuple)
-        
+
         # Move to next chunk
         current_chunk_start = datetime(current_chunk_start.year + 5, 1, 1)
-    
+
     # Filter out completed chunks
     remaining_chunks = [c for c in all_five_year_chunks if c not in completed_chunks]
-    
+
     logger.info(f"📊 Total 5-year chunks: {len(all_five_year_chunks)}")
     logger.info(f"✅ Already completed: {len(completed_chunks)}")
     logger.info(f"⏳ Remaining chunks: {len(remaining_chunks)}")
-    
+
     if not remaining_chunks:
         logger.info("🎉 All chunks completed! Clearing progress file.")
         clear_fill_progress()
         return
-    
+
     # Process ONLY THE FIRST remaining chunk in this run
     chunk_start, chunk_end = remaining_chunks[0]
     logger.info("")
     logger.info(f"{'='*70}")
-    logger.info(f"📦 Processing chunk {len(completed_chunks) + 1}/{len(all_five_year_chunks)}: {chunk_start} to {chunk_end}")
+    logger.info(
+        f"📦 Processing chunk {len(completed_chunks) + 1}/{len(all_five_year_chunks)}: {chunk_start} to {chunk_end}"
+    )
     logger.info(f"{'='*70}")
     logger.info("")
-    
+
     # Track years processed in this chunk
     years_in_chunk = set()
     current_year = None
     chunk_changes = {}
     upload_metadata = {}
-    
+
     # Use immediate upload mode
-    with S3ArchiveManager(s3_bucket, S3_PREFIX, LOCAL_DIR, immediate_upload=True) as archive_manager:
+    with S3ArchiveManager(
+        s3_bucket, S3_PREFIX, LOCAL_DIR, immediate_upload=True
+    ) as archive_manager:
         try:
             # Generate date ranges for this chunk only
-            chunk_date_ranges = list(get_date_ranges_to_process(chunk_start, chunk_end, day_step))
+            chunk_date_ranges = list(
+                get_date_ranges_to_process(chunk_start, chunk_end, day_step)
+            )
             total_ranges = len(chunk_date_ranges)
             logger.info(f"📝 Processing {total_ranges} date ranges in this chunk")
 
@@ -1633,13 +1678,17 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
                     # Check timeout
                     elapsed_time = time.time() - start_time
                     if elapsed_time >= timeout_seconds:
-                        logger.warning(f"⏰ Timeout reached after {elapsed_time/3600:.2f} hours")
-                        logger.warning("⚠️  Did not complete the full chunk - will retry from chunk start next run")
+                        logger.warning(
+                            f"⏰ Timeout reached after {elapsed_time/3600:.2f} hours"
+                        )
+                        logger.warning(
+                            "⚠️  Did not complete the full chunk - will retry from chunk start next run"
+                        )
                         return  # Exit without marking chunk as complete
-                    
+
                     logger.info("")
                     logger.info(f"  Range {i}/{total_ranges}: {from_date} to {to_date}")
-                    
+
                     # Process this date range
                     tasks = list(generate_tasks(from_date, to_date, 1))
                     tasks_bar = tqdm(
@@ -1652,19 +1701,25 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
                     try:
                         for task in tasks_bar:
                             if time.time() - start_time >= timeout_seconds:
-                                logger.warning("⏰ Timeout reached during task processing")
+                                logger.warning(
+                                    "⏰ Timeout reached during task processing"
+                                )
                                 return  # Exit without marking chunk as complete
-                            
+
                             process_task(task, archive_manager)
-                            
+
                             # Track year and upload when year changes
-                            task_year = datetime.strptime(task.from_date, "%Y-%m-%d").year
+                            task_year = datetime.strptime(
+                                task.from_date, "%Y-%m-%d"
+                            ).year
                             if current_year is not None and task_year != current_year:
                                 # Year changed - upload previous year's data
-                                logger.info(f"📤 Year changed from {current_year} to {task_year}, uploading {current_year} data...")
+                                logger.info(
+                                    f"📤 Year changed from {current_year} to {task_year}, uploading {current_year} data..."
+                                )
                                 archive_manager.upload_year_archives(current_year)
                                 years_in_chunk.add(current_year)
-                            
+
                             current_year = task_year
                     finally:
                         tasks_bar.close()
@@ -1676,39 +1731,43 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
                 logger.info(f"📤 Uploading final year {current_year} data...")
                 archive_manager.upload_year_archives(current_year)
                 years_in_chunk.add(current_year)
-            
+
             logger.info("")
             logger.info(f"✅ Completed chunk: {chunk_start} to {chunk_end}")
-            
+
             # Mark this chunk as completed
             completed_chunks.append((chunk_start, chunk_end))
-            
+
             # Save progress
             progress_data = {
                 "start_date": overall_start,
                 "end_date": overall_end,
                 "last_chunk_end": chunk_end,
                 "completed_chunks": completed_chunks,
-                "last_updated": datetime.now().isoformat()
+                "last_updated": datetime.now().isoformat(),
             }
-            
+
             with open(get_fill_progress_file(), "w") as f:
                 json.dump(progress_data, f, indent=2)
-            
+
             logger.info("💾 Progress saved")
-            
+
         except KeyboardInterrupt:
             logger.warning("")
             logger.warning("⚠️  Process interrupted by user (Ctrl+C)")
-            logger.warning("⚠️  Chunk was NOT fully completed - will retry from chunk start next run")
+            logger.warning(
+                "⚠️  Chunk was NOT fully completed - will retry from chunk start next run"
+            )
             logger.warning("💡 Data downloaded so far has been uploaded to S3")
             return
         except Exception as e:
             logger.error(f"❌ Error processing chunk: {e}")
-            logger.error("⚠️  Chunk was NOT completed - will retry from chunk start next run")
+            logger.error(
+                "⚠️  Chunk was NOT completed - will retry from chunk start next run"
+            )
             traceback.print_exc()
             return
-            
+
         chunk_changes = archive_manager.get_all_changes()
         upload_metadata = archive_manager.get_upload_metadata()
 
@@ -1733,9 +1792,7 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     summary_payload = {
         "chunk": {"start": chunk_start, "end": chunk_end},
         "generated_at": datetime.now().isoformat(),
-        "years": {
-            str(year): meta for year, meta in upload_metadata.items()
-        },
+        "years": {str(year): meta for year, meta in upload_metadata.items()},
         "files": chunk_changes,
     }
     summary_path = Path("./chunk_changes_summary.json")
@@ -1746,26 +1803,30 @@ def sync_s3_fill_gaps(s3_bucket, start_date=None, end_date=None, day_step=30, ma
     # Process metadata to parquet for the years in this chunk
     if years_in_chunk:
         logger.info("")
-        logger.info(f"📊 Processing metadata to parquet for years: {sorted(years_in_chunk)}")
+        logger.info(
+            f"📊 Processing metadata to parquet for years: {sorted(years_in_chunk)}"
+        )
         try:
             generate_parquet_from_metadata(s3_bucket, list(years_in_chunk))
         except Exception as e:
             logger.warning(f"⚠️  Parquet generation failed: {e}")
-    
+
     # Check if all chunks are done
     if len(completed_chunks) == len(all_five_year_chunks):
         logger.info("")
-        logger.info("🎉 " + "="*66)
-        logger.info("🎉 ALL CHUNKS COMPLETED! Gap-filling process finished successfully!")
-        logger.info("🎉 " + "="*66)
+        logger.info("🎉 " + "=" * 66)
+        logger.info(
+            "🎉 ALL CHUNKS COMPLETED! Gap-filling process finished successfully!"
+        )
+        logger.info("🎉 " + "=" * 66)
         clear_fill_progress()
     else:
         remaining = len(all_five_year_chunks) - len(completed_chunks)
         logger.info("")
-        logger.info("📌 " + "="*66)
+        logger.info("📌 " + "=" * 66)
         logger.info(f"📌 Chunk completed! {remaining} chunks remaining")
         logger.info("📌 Run the same command again to process the next chunk")
-        logger.info("📌 " + "="*66)
+        logger.info("📌 " + "=" * 66)
 
 
 def find_missing_date_ranges(s3_bucket, start_date=None, end_date=None):
@@ -1773,7 +1834,9 @@ def find_missing_date_ranges(s3_bucket, start_date=None, end_date=None):
     DEPRECATED: This function is no longer used.
     The new approach downloads everything and lets deduplication handle existing files.
     """
-    logger.warning("find_missing_date_ranges is deprecated. Use sync_s3_fill_gaps directly.")
+    logger.warning(
+        "find_missing_date_ranges is deprecated. Use sync_s3_fill_gaps directly."
+    )
     return []
 
 
@@ -1954,7 +2017,7 @@ if __name__ == "__main__":
             end_date=args.end_date,
             day_step=args.day_step,
             max_workers=args.max_workers,
-            timeout_hours=args.timeout_hours
+            timeout_hours=args.timeout_hours,
         )
     elif args.sync_s3:
         with S3ArchiveManager(S3_BUCKET, S3_PREFIX, LOCAL_DIR) as archive_manager:
