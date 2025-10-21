@@ -1689,10 +1689,11 @@ def sync_s3_fill_gaps(
 
             date_range_bar = tqdm(
                 chunk_date_ranges,
-                desc=f"📆 Ranges {chunk_start}→{chunk_end}",
+                desc=f"\x1b[36m📆 Ranges {chunk_start}→{chunk_end}\x1b[0m",  # Cyan text
                 unit="range",
                 leave=True,
-                colour="cyan",
+                colour="cyan",  # Cyan bar
+                bar_format="\x1b[36m{l_bar}\x1b[0m{bar}\x1b[36m{r_bar}\x1b[0m",  # Cyan text, keep bar colored
                 ncols=100,
                 position=0,
                 file=sys.stderr,
@@ -1742,8 +1743,8 @@ def sync_s3_fill_gaps(
                             "⚠️  Did not complete the full chunk - will resume from next year on next run"
                         )
                         return  # Exit without marking chunk as complete
-
-                    logger.info(f"  Range {i}/{total_ranges}: {from_date} to {to_date}")
+                    logger.info("")
+                    logger.info(f"Range {i}/{total_ranges}: {from_date} to {to_date}")
 
                     # Process this date range (without nested progress bar)
                     tasks = list(generate_tasks(from_date, to_date, 1))
