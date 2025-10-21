@@ -1900,8 +1900,13 @@ def sync_s3_fill_gaps(
         logger.info(
             f"📊 Processing metadata to parquet for years: {sorted(years_in_chunk)}"
         )
+        # Give S3 a moment to propagate the newly uploaded files
+        import time as time_module
+
+        time_module.sleep(5)
         try:
-            generate_parquet_from_metadata(s3_bucket, list(years_in_chunk))
+            # Convert years to strings to match --sync-s3 behavior (year_dir.name returns strings)
+            generate_parquet_from_metadata(s3_bucket, [str(y) for y in years_in_chunk])
         except Exception as e:
             logger.warning(f"⚠️  Parquet generation failed: {e}")
 

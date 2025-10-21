@@ -296,7 +296,14 @@ class SupremeCourtS3Processor:
                 pass
 
             # Upload file to S3
-            self.s3.upload_file(tmp_file.name, self.s3_bucket, s3_key)
+            try:
+                self.s3.upload_file(str(tmp_file.name), self.s3_bucket, s3_key)
+                logger.info(f"✓ Successfully uploaded parquet to {s3_key}")
+            except Exception as e:
+                logger.error(
+                    f"Failed to upload {tmp_file.name} to {self.s3_bucket}/{s3_key}: {e}"
+                )
+                raise
 
         return len(records)
 
