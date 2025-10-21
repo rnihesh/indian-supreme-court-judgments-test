@@ -1556,7 +1556,7 @@ def sync_s3_fill_gaps(
     end_date=None,
     day_step=30,
     max_workers=5,
-    timeout_hours=5.5,
+    timeout_hours=None,
 ):
     """
     Fill gaps in S3 data by processing ONE 5-year chunk per run.
@@ -1569,15 +1569,18 @@ def sync_s3_fill_gaps(
         end_date: End date for gap analysis (defaults to current date)
         day_step: Number of days per download chunk
         max_workers: Number of parallel workers
-        timeout_hours: Maximum hours to run before graceful exit (default 5.5 hours)
+        timeout_hours: Maximum hours to run before graceful exit (default None = no timeout)
     """
     start_time = time.time()
-    timeout_seconds = timeout_hours * 3600
+    timeout_seconds = timeout_hours * 3600 if timeout_hours else None
 
     logger.info("🚀 Starting 5-year chunk S3 gap-filling process...")
-    logger.info(
-        f"⏰ Timeout set to {timeout_hours} hours ({timeout_seconds/60:.0f} minutes)"
-    )
+    if timeout_hours:
+        logger.info(
+            f"⏰ Timeout set to {timeout_hours} hours ({timeout_seconds/60:.0f} minutes)"
+        )
+    else:
+        logger.info("⏰ No timeout - will run until completion")
 
     # Check for existing progress
     existing_progress = load_fill_progress()
@@ -1744,77 +1747,53 @@ def sync_s3_fill_gaps(
                         )
                         return  # Exit without marking chunk as complete
                     logger.info("")
-                    logger.info(f"Range {i}/{total_ranges}: {from_date} to {to_date}")
+                    logger.debug(
+                        f"  Range {i}/{total_ranges}: {from_date} to {to_date}"
+                    )
 
-                    # Process this date range (without nested progress bar)
-                    tasks = list(generate_tasks(from_date, to_date, 1))
+                    # Use the existing run() function which already has parallel processing built-in
+                    run(
+                        start_date=from_date,
+                        end_date=to_date,
+                        day_step=1,
+                        max_workers=max_workers,
+                        package_on_startup=False,
+                        archive_manager=archive_manager,
+                    )
 
-                    for task in tasks:
-                        if time.time() - start_time >= timeout_seconds:
-                            # Upload current year before timeout
-                            if current_year is not None:
-                                logger.info(
-                                    f"📤 Uploading final year {current_year} before timeout..."
-                                )
-                                archive_manager.upload_year_archives(current_year)
-                                years_in_chunk.add(current_year)
+                    # Track year for uploads after processing the date range
+                    date_year = datetime.strptime(from_date, "%Y-%m-%d").year
+                    if current_year is not None and date_year != current_year:
+                        # Year changed - upload previous year's data (if not already uploaded)
+                        if current_year not in completed_years_in_chunk:
+                            logger.info(
+                                f"📤 Year changed from {current_year} to {date_year}, uploading {current_year} data..."
+                            )
+                            archive_manager.upload_year_archives(current_year)
+                            years_in_chunk.add(current_year)
 
-                            # Save progress with completed years
-                            if years_in_chunk:
-                                logger.info(
-                                    f"💾 Saving progress: uploaded years {sorted(years_in_chunk)}"
-                                )
-                                progress_data = {
-                                    "start_date": overall_start,
-                                    "end_date": overall_end,
-                                    "current_chunk": (chunk_start, chunk_end),
-                                    "completed_years_in_current_chunk": sorted(
-                                        list(years_in_chunk)
-                                    ),
-                                    "completed_chunks": completed_chunks,
-                                    "last_updated": datetime.now().isoformat(),
-                                }
-                                with open(get_fill_progress_file(), "w") as f:
-                                    json.dump(progress_data, f, indent=2)
+                            # Save progress immediately after uploading a year
+                            logger.info(
+                                f"💾 Saving progress: completed year {current_year}"
+                            )
+                            progress_data = {
+                                "start_date": overall_start,
+                                "end_date": overall_end,
+                                "current_chunk": (chunk_start, chunk_end),
+                                "completed_years_in_current_chunk": sorted(
+                                    list(years_in_chunk)
+                                ),
+                                "completed_chunks": completed_chunks,
+                                "last_updated": datetime.now().isoformat(),
+                            }
+                            with open(get_fill_progress_file(), "w") as f:
+                                json.dump(progress_data, f, indent=2)
+                        else:
+                            logger.info(
+                                f"⏭️  Skipping upload for {current_year} (already uploaded)"
+                            )
 
-                            logger.warning("⏰ Timeout reached during task processing")
-                            return  # Exit without marking chunk as complete
-
-                        process_task(task, archive_manager)
-
-                        # Track year and upload when year changes
-                        task_year = datetime.strptime(task.from_date, "%Y-%m-%d").year
-                        if current_year is not None and task_year != current_year:
-                            # Year changed - upload previous year's data (if not already uploaded)
-                            if current_year not in completed_years_in_chunk:
-                                logger.info(
-                                    f"📤 Year changed from {current_year} to {task_year}, uploading {current_year} data..."
-                                )
-                                archive_manager.upload_year_archives(current_year)
-                                years_in_chunk.add(current_year)
-
-                                # Save progress immediately after uploading a year
-                                logger.info(
-                                    f"💾 Saving progress: completed year {current_year}"
-                                )
-                                progress_data = {
-                                    "start_date": overall_start,
-                                    "end_date": overall_end,
-                                    "current_chunk": (chunk_start, chunk_end),
-                                    "completed_years_in_current_chunk": sorted(
-                                        list(years_in_chunk)
-                                    ),
-                                    "completed_chunks": completed_chunks,
-                                    "last_updated": datetime.now().isoformat(),
-                                }
-                                with open(get_fill_progress_file(), "w") as f:
-                                    json.dump(progress_data, f, indent=2)
-                            else:
-                                logger.info(
-                                    f"⏭️  Skipping upload for {current_year} (already uploaded)"
-                                )
-
-                        current_year = task_year
+                    current_year = date_year
             finally:
                 date_range_bar.close()
 
