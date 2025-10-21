@@ -2,7 +2,7 @@ name: Fill S3 Data (5-Year Chunks)
 
 on:
   # schedule:
-  #  - cron: "0 */6 * * *" # Runs every 6 hours to process one chunk at a time
+  #  - cron: "0 */6 * * *" # Runs every 6 hours - processes as many chunks as possible within timeout
   workflow_dispatch: {}
 
 jobs:
@@ -18,7 +18,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Update S3 data
+      - name: Update S3 data (process all remaining chunks within timeout)
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_KEY }}
@@ -36,15 +36,15 @@ jobs:
           if git diff --staged --quiet; then
             echo "No changes to commit"
           else
-            # Check if this was a chunk completion or interruption
+            # Check if this was timeout or completion
             if [ -f "sc_fill_progress.json" ]; then
               # Extract chunk info from progress file
               if command -v jq >/dev/null 2>&1; then
                 completed_chunks=$(jq -r '.completed_chunks | length' sc_fill_progress.json 2>/dev/null || echo "unknown")
                 last_chunk=$(jq -r '.last_chunk_end // "unknown"' sc_fill_progress.json 2>/dev/null || echo "unknown")
-                git commit -m "S3 fill progress: $completed_chunks chunks completed (last: $last_chunk) - ${timestamp}" || exit 0
+                git commit -m "S3 fill progress: $completed_chunks chunks completed (timeout reached, last: $last_chunk) - ${timestamp}" || exit 0
               else
-                git commit -m "S3 fill progress saved: ${timestamp}" || exit 0
+                git commit -m "S3 fill progress saved (timeout reached): ${timestamp}" || exit 0
               fi
             else
               echo "No progress file - all chunks completed!"
@@ -60,8 +60,8 @@ jobs:
           echo "Run completed at: $(date)" >> $GITHUB_STEP_SUMMARY
 
           if [ -f "sc_fill_progress.json" ]; then
-            echo "� **Status**: Chunk completed - Progress saved" >> $GITHUB_STEP_SUMMARY
-            echo "🔄 **Next Action**: Run workflow again to process next chunk" >> $GITHUB_STEP_SUMMARY
+            echo "📊 **Status**: Timeout reached - Progress saved" >> $GITHUB_STEP_SUMMARY
+            echo "🔄 **Next Action**: Run workflow again to continue with remaining chunks" >> $GITHUB_STEP_SUMMARY
             
             # Extract progress info
             if command -v jq >/dev/null 2>&1; then
@@ -91,7 +91,7 @@ jobs:
         if: always()
         run: |
           if [ -f "sc_fill_progress.json" ]; then
-            echo "::notice::Chunk completed at $(date) - Run workflow again to continue with next chunk"
+            echo "::notice::Timeout reached at $(date) - Run workflow again to continue with remaining chunks"
           else
             echo "::notice::All chunks completed successfully at $(date) - Process finished!"
           fi
