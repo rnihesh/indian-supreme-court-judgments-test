@@ -1,4 +1,4 @@
-name: Fill S3 Data (5-Year Chunks)
+name: Fill S3 Data (5 - Year Chunks)
 
 on:
   # schedule:
